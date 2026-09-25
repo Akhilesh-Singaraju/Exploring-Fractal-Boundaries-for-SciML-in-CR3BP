@@ -23,16 +23,13 @@ def init_py(x, y, E=0.25):
 
 
 def get_exit(x, y):
-    ang = np.arctan2(y, x)
-    if ang < 0:
-        ang += 2 * np.pi
-
-    d1 = abs(ang - np.pi / 2)
-    d2 = abs(ang - 7 * np.pi / 6)
-    d3 = abs(ang - 11 * np.pi / 6)
-
-    m = min(d1, d2, d3)
-    return 1 if m == d1 else 2 if m == d2 else 3
+    ang = np.arctan2(y, x) % (2 * np.pi)
+    if np.pi / 6 <= ang < 5 * np.pi / 6:
+        return 1
+    elif 5 * np.pi / 6 <= ang < 3 * np.pi / 2:
+        return 2
+    else:
+        return 3
 
 
 def sim_point(args):
