@@ -3,8 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
 def verify_dataset(filepath='val_grid.npy'):
-    data1 = np.load(filepath)
-    data = data1.T
+    data = np.load(filepath)
     n = data.shape[0]
     
     extent = [-0.8, 0.8, -0.8, 0.8]

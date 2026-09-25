@@ -59,12 +59,13 @@ def gen_grid(n):
     xs = np.linspace(-0.8, 0.8, n)
     ys = np.linspace(-0.8, 0.8, n)
 
-    pts = [(x, y) for x in xs for y in ys]
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    pts = list(zip(grid_x.ravel(), grid_y.ravel()))
 
     with mp.Pool() as pool:
         res = list(
             tqdm(
-                pool.imap(sim_point, pts, chunksize=100),
+                pool.imap(sim_point, pts, chunksize=500),
                 total=len(pts),
                 desc=f"Generating {n}x{n} grid"
             )
