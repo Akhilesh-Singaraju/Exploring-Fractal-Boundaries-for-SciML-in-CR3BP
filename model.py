@@ -7,15 +7,15 @@ class Model(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(2, hidden_dim),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Dropout(p=dropout_rate),
             
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Dropout(p=dropout_rate),
             
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Dropout(p=dropout_rate),
             
             nn.Linear(hidden_dim, 3)
