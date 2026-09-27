@@ -1,100 +1,116 @@
 import numpy as np
-from scipy.integrate import solve_ivp
+from numba import njit
 
-from cr3bp import (
-    MU,
-    R_EARTH,
-    R_MOON,
-    R_ESCAPE,
-    rhs,
-    initial_state_from_x_vx,
-    distances,
-)
+MU = 0.0121505856
+R_EARTH = 6378.1363 / 384400.0
+R_MOON = 1737.4 / 384400.0
+R_ESCAPE = 5.0
 
 
-def earth_event(t, state):
-    x, y, *_ = state
-    r1, _ = distances(x, y)
-    return r1 - R_EARTH
-
-earth_event.terminal = True
-earth_event.direction = -1
-
-
-def moon_event(t, state):
-    x, y, *_ = state
-    _, r2 = distances(x, y)
-    return r2 - R_MOON
-
-moon_event.terminal = True
-moon_event.direction = -1
+@njit(fastmath=True)
+def distances(x, y):
+    dx1 = x + MU
+    dx2 = x - 1.0 + MU
+    r1 = np.sqrt(dx1 * dx1 + y * y)
+    r2 = np.sqrt(dx2 * dx2 + y * y)
+    return r1, r2
 
 
-def escape_event(t, state):
-    x, y, vx, vy = state
-    r = np.hypot(x, y)
-    return r - R_ESCAPE
-
-escape_event.terminal = True
-escape_event.direction = 1
+@njit(fastmath=True)
+def omega(x, y):
+    r1, r2 = distances(x, y)
+    return 0.5 * (x * x + y * y) + (1.0 - MU) / r1 + MU / r2
 
 
-def integrate_state(x0, vx0, C, t_max=100.0, rtol=1e-10, atol=1e-12, max_step=0.05):
-    state0 = initial_state_from_x_vx(x0, vx0, C)
-    if state0 is None:
-        return {
-            "outcome": "Invalid",
-            "t_event": np.nan,
-            "state0": None,
-            "solution": None,
-        }
+@njit(fastmath=True)
+def jacobi(x, y, vx, vy):
+    return 2.0 * omega(x, y) - (vx * vx + vy * vy)
 
-    sol = solve_ivp(
-        rhs,
-        (0.0, t_max),
-        state0,
-        events=[earth_event, moon_event, escape_event],
-        rtol=rtol,
-        atol=atol,
-        max_step=max_step,
-        dense_output=False,
-    )
 
-    outcome = "Unresolved"
-    t_event = np.nan
+@njit(fastmath=True)
+def rhs_numba(state, out):
+    x, y, vx, vy = state[0], state[1], state[2], state[3]
+    dx1 = x + MU
+    dx2 = x - 1.0 + MU
+    r1_sq = dx1 * dx1 + y * y
+    r2_sq = dx2 * dx2 + y * y
 
-    if len(sol.t_events[0]) > 0:
-        outcome = "Earth"
-        t_event = sol.t_events[0][0]
-    elif len(sol.t_events[1]) > 0:
-        outcome = "Moon"
-        t_event = sol.t_events[1][0]
-    elif len(sol.t_events[2]) > 0:
-        outcome = "Escape"
-        t_event = sol.t_events[2][0]
+    r1_3 = r1_sq * np.sqrt(r1_sq)
+    r2_3 = r2_sq * np.sqrt(r2_sq)
 
-    if sol.y.shape[1] > 0:
-        x = sol.y[0]
-        y = sol.y[1]
-        r1, r2 = distances(x, y)
-        r = np.hypot(x, y)
-        min_r1 = float(np.min(r1))
-        min_r2 = float(np.min(r2))
-        max_r = float(np.max(r))
-    else:
-        min_r1 = np.nan
-        min_r2 = np.nan
-        max_r = np.nan
+    dOmega_dx = x - (1.0 - MU) * dx1 / r1_3 - MU * dx2 / r2_3
+    dOmega_dy = y - (1.0 - MU) * y / r1_3 - MU * y / r2_3
 
-    return {
-        "outcome": outcome,
-        "t_event": t_event,
-        "state0": state0,
-        "solution": sol,
-        "solver_success": bool(sol.success),
-        "solver_message": sol.message,
-        "n_steps": int(sol.t.size),
-        "min_r_earth": min_r1,
-        "min_r_moon": min_r2,
-        "max_r": max_r,
-    }
+    out[0] = vx
+    out[1] = vy
+    out[2] = dOmega_dx + 2.0 * vy
+    out[3] = dOmega_dy - 2.0 * vx
+
+
+@njit(fastmath=True)
+def initial_state_from_x_vx(x0, vx0, C, vy_sign=1.0):
+    y0 = 0.0
+    vy2 = 2.0 * omega(x0, y0) - C - vx0 * vx0
+    if vy2 < 0.0:
+        return np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64), False
+    vy0 = vy_sign * np.sqrt(vy2)
+    return np.array([x0, y0, vx0, vy0], dtype=np.float64), True
+
+OUTCOME_MAP = {
+    0: "INVALID_ENERGY",
+    1: "IMPACT_EARTH",
+    2: "IMPACT_MOON",
+    3: "ESCAPE",
+    4: "MAX_TIME",
+}
+
+@njit(fastmath=True)
+def rk4_step(state, dt):
+    k1 = np.empty(4, dtype=np.float64)
+    k2 = np.empty(4, dtype=np.float64)
+    k3 = np.empty(4, dtype=np.float64)
+    k4 = np.empty(4, dtype=np.float64)
+
+    rhs_numba(state, k1)
+    rhs_numba(state + 0.5 * dt * k1, k2)
+    rhs_numba(state + 0.5 * dt * k2, k3)
+    rhs_numba(state + dt * k3, k4)
+
+    return state + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+
+@njit(fastmath=True)
+def integrate_single_numba(x0, vx0, C, t_max, dt=0.01):
+    state, valid = initial_state_from_x_vx(x0, vx0, C)
+    if not valid:
+        return 0, 0.0, 0, 0.0, 0.0, 0.0
+
+    t = 0.0
+    steps = 0
+    min_r1 = 1e9
+    min_r2 = 1e9
+    max_r = 0.0
+
+    while t < t_max:
+        r1, r2 = distances(state[0], state[1])
+        r_center = np.sqrt(state[0] ** 2 + state[1] ** 2)
+
+        if r1 < min_r1:
+            min_r1 = r1
+        if r2 < min_r2:
+            min_r2 = r2
+        if r_center > max_r:
+            max_r = r_center
+
+        if r1 < R_EARTH:
+            return 1, t, steps, min_r1, min_r2, max_r
+        if r2 < R_MOON:
+            return 2, t, steps, min_r1, min_r2, max_r
+        if r_center > R_ESCAPE:
+            return 3, t, steps, min_r1, min_r2, max_r
+
+        state = rk4_step(state, dt)
+        t += dt
+        steps += 1
+
+    return 4, t_max, steps, min_r1, min_r2, max_r
