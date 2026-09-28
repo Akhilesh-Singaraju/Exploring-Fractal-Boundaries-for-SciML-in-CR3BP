@@ -1,5 +1,6 @@
 import numpy as np
-from numba import njit
+from numba import njit, prange
+import pandas as pd
 
 MU = 0.0121505856
 R_EARTH = 6378.1363 / 384400.0
@@ -114,3 +115,57 @@ def integrate_single_numba(x0, vx0, C, t_max, dt=0.01):
         steps += 1
 
     return 4, t_max, steps, min_r1, min_r2, max_r
+
+@njit(parallel=True, fastmath=True)
+def generate_basin_grid_numba(x_arr, vx_arr, C, t_max, dt=0.01):
+    nx = len(x_arr)
+    nvx = len(vx_arr)
+    
+    labels = np.empty((nvx, nx), dtype=np.int32)
+    t_events = np.empty((nvx, nx), dtype=np.float64)
+    n_steps_arr = np.empty((nvx, nx), dtype=np.int32)
+    min_r1_arr = np.empty((nvx, nx), dtype=np.float64)
+    min_r2_arr = np.empty((nvx, nx), dtype=np.float64)
+    max_r_arr = np.empty((nvx, nx), dtype=np.float64)
+
+    for i in prange(nvx):
+        vx0 = vx_arr[i]
+        for j in range(nx):
+            x0 = x_arr[j]
+            label, t_ev, steps, r1, r2, rmax = integrate_single_numba(
+                x0, vx0, C, t_max, dt
+            )
+            labels[i, j] = label
+            t_events[i, j] = t_ev
+            n_steps_arr[i, j] = steps
+            min_r1_arr[i, j] = r1
+            min_r2_arr[i, j] = r2
+            max_r_arr[i, j] = rmax
+
+    return labels, t_events, n_steps_arr, min_r1_arr, min_r2_arr, max_r_arr
+
+
+def generate_basin_grid(C, t_max, res_x=300, res_vx=300, x_bounds=(-1.5, 1.5), vx_bounds=(-3.0, 3.0), dt=0.01):
+    x_arr = np.linspace(x_bounds[0], x_bounds[1], res_x)
+    vx_arr = np.linspace(vx_bounds[0], vx_bounds[1], res_vx)
+
+    labels, t_events, n_steps, min_r1, min_r2, max_r = generate_basin_grid_numba(
+        x_arr, vx_arr, C, t_max, dt
+    )
+
+    x_mesh, vx_mesh = np.meshgrid(x_arr, vx_arr)
+    
+    df = pd.DataFrame({
+        "x0": x_mesh.ravel(),
+        "vx0": vx_mesh.ravel(),
+        "C": C,
+        "label_id": labels.ravel(),
+        "outcome": [OUTCOME_MAP[l] for l in labels.ravel()],
+        "t_event": t_events.ravel(),
+        "n_steps": n_steps.ravel(),
+        "min_r_earth": min_r1.ravel(),
+        "min_r_moon": min_r2.ravel(),
+        "max_r": max_r.ravel(),
+    })
+    
+    return df
