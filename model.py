@@ -35,7 +35,7 @@ PATIENCE = 7
 
 
 class BasinClassifier(nn.Module):
-    def __init__(self, input_dim=2, num_classes=4):
+    def __init__(self, input_dim=2, num_classes=3):
         super().__init__()
 
         self.net = nn.Sequential(
@@ -226,7 +226,41 @@ def train_ensemble_member(
         num_classes=num_classes
     ).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    class_counts = np.bincount(
+        y_train,
+        minlength=num_classes
+    )
+
+    class_weights = (
+        len(y_train)
+        / (num_classes * class_counts)
+    )
+
+    class_weights = torch.tensor(
+        class_weights,
+        dtype=torch.float32,
+        device=device
+    )
+
+    print("  Training class counts:")
+    for class_idx, count in enumerate(class_counts):
+        print(
+            f"    Class {class_idx}: "
+            f"{count} ({count / len(y_train):.2%})"
+        )
+
+    print("  Class weights:")
+    for class_idx, weight in enumerate(class_weights.cpu().numpy()):
+        print(
+            f"    Class {class_idx}: "
+            f"{weight:.4f}"
+        )
+
+    criterion = nn.CrossEntropyLoss(
+        weight=class_weights
+    )
+
+    test_criterion = nn.CrossEntropyLoss()
 
     optimizer = optim.Adam(
         model.parameters(),
@@ -285,6 +319,7 @@ def train_ensemble_member(
             val_loader,
             criterion
         )
+        
 
 
         if val_loss < best_val_loss:
@@ -331,7 +366,7 @@ def train_ensemble_member(
     test_loss, test_accuracy = evaluate(
         model,
         test_loader,
-        criterion
+        test_criterion
     )
 
     print(
@@ -345,6 +380,7 @@ def train_ensemble_member(
         "model": model,
         "scaler": scaler,
         "label_encoder": label_encoder,
+        "class_weights": class_weights.cpu().numpy(),
         "best_val_loss": best_val_loss,
         "test_loss": test_loss,
         "test_accuracy": test_accuracy,
@@ -405,6 +441,7 @@ for C in C_VALUES:
                 "scaler_mean": result["scaler"].mean_,
                 "scaler_scale": result["scaler"].scale_,
                 "label_classes": result["label_encoder"].classes_,
+                "class_weights": result["class_weights"],
                 "best_val_loss": result["best_val_loss"],
                 "test_loss": result["test_loss"],
                 "test_accuracy": result["test_accuracy"],
