@@ -9,7 +9,7 @@ import torch.utils.data as data
 
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
-
+from sklearn.metrics import balanced_accuracy_score, classification_report, confusion_matrix
 
 np.random.seed(42)
 
@@ -54,6 +54,30 @@ class BasinClassifier(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+def evaluate_extra(model, loader, label_encoder):
+    model.eval()
+    all_preds = []
+    all_targets = []
+
+    with torch.no_grad():
+        for inputs, labels in loader:
+            inputs = inputs.to(device)
+            outputs = model(inputs)
+            preds = outputs.argmax(dim=1).cpu().numpy()
+            
+            all_preds.extend(preds)
+            all_targets.extend(labels.numpy())
+
+    all_preds = np.array(all_preds)
+    all_targets = np.array(all_targets)
+
+    bal_acc = balanced_accuracy_score(all_targets, all_preds)
+    print("\n  Classification Report:")
+    print(classification_report(all_targets, all_preds, target_names=[str(c) for c in label_encoder.classes_]))
+    print("  Confusion Matrix:")
+    print(confusion_matrix(all_targets, all_preds))
+    
+    return bal_acc
 
 def evaluate(model, loader, criterion):
     model.eval()
@@ -231,10 +255,9 @@ def train_ensemble_member(
         minlength=num_classes
     )
 
-    class_weights = (
-        len(y_train)
-        / (num_classes * class_counts)
-    )
+    class_weights = np.sqrt(len(y_train) / (num_classes * class_counts))
+
+    class_weights = class_weights / np.mean(class_weights)
 
     class_weights = torch.tensor(
         class_weights,
@@ -256,6 +279,10 @@ def train_ensemble_member(
             f"{weight:.4f}"
         )
 
+    test_counts = np.bincount(y_test, minlength=num_classes)
+    print("  Test class counts:")
+    for class_idx, count in enumerate(test_counts):
+        print(f"    Class {class_idx}: {count} ({count / len(y_test):.2%})")
     criterion = nn.CrossEntropyLoss(
         weight=class_weights
     )
@@ -375,6 +402,13 @@ def train_ensemble_member(
         f"Test Acc: {test_accuracy:.4f}"
     )
 
+    print("  Detailed Test Performance:")
+    test_bal_acc = evaluate_extra(
+        model=model,
+        loader=test_loader,
+        label_encoder=label_encoder,
+    )
+
 
     return {
         "model": model,
@@ -384,6 +418,7 @@ def train_ensemble_member(
         "best_val_loss": best_val_loss,
         "test_loss": test_loss,
         "test_accuracy": test_accuracy,
+        "test_bal_acc": test_bal_acc,
     }
 
 
