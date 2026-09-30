@@ -9,7 +9,11 @@ import torch.utils.data as data
 
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import balanced_accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    classification_report,
+    confusion_matrix,
+)
 
 np.random.seed(42)
 
@@ -26,12 +30,12 @@ num_ensembles = 5
 
 C_VALUES = [3.00, 3.05, 3.10, 3.14, 3.20]
 
-EPOCHS = 25
+EPOCHS = 75
 BATCH_SIZE = 256
 LEARNING_RATE = 1e-3
 
 VAL_FRACTION = 0.15
-PATIENCE = 7
+PATIENCE = 16
 
 
 class BasinClassifier(nn.Module):
@@ -41,20 +45,18 @@ class BasinClassifier(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.GELU(),
-
             nn.Linear(64, 64),
             nn.GELU(),
-
             nn.Linear(64, 32),
             nn.GELU(),
-
-            nn.Linear(32, num_classes)
+            nn.Linear(32, num_classes),
         )
 
     def forward(self, x):
         return self.net(x)
 
-def evaluate_extra(model, loader, label_encoder):
+
+def evaluate_extra(model, loader, label_encoder, device):
     model.eval()
     all_preds = []
     all_targets = []
@@ -66,18 +68,26 @@ def evaluate_extra(model, loader, label_encoder):
             preds = outputs.argmax(dim=1).cpu().numpy()
             
             all_preds.extend(preds)
-            all_targets.extend(labels.numpy())
+            all_targets.extend(labels.cpu().numpy())
 
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
 
     bal_acc = balanced_accuracy_score(all_targets, all_preds)
+    
     print("\n  Classification Report:")
-    print(classification_report(all_targets, all_preds, target_names=[str(c) for c in label_encoder.classes_]))
+    print(classification_report(
+        all_targets, 
+        all_preds, 
+        target_names=[f"Class {c}" for c in label_encoder.classes_],
+        zero_division=0
+    ))
     print("  Confusion Matrix:")
     print(confusion_matrix(all_targets, all_preds))
+    print(f"  Balanced Accuracy: {bal_acc:.4f}\n", flush=True)
     
     return bal_acc
+
 
 def evaluate(model, loader, criterion):
     model.eval()
@@ -114,48 +124,43 @@ def train_ensemble_member(
     val_fraction=VAL_FRACTION,
     patience=PATIENCE
 ):
-
-
     seed = 42 + int(c_val * 100) + model_idx
 
     np.random.seed(seed)
     torch.manual_seed(seed)
-
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
 
     csv_path = f"files/basin_C{c_val:.2f}.csv"
     df = pd.read_csv(csv_path)
 
     df_clean = df[~df["label_id"].isin([0, 4])].copy()
 
+    # --- 1. FINER SPATIAL BLOCK GRID (20x20 grid, 15% held out) ---
+    x_bins = pd.qcut(df_clean['x0'], q=20, labels=False, duplicates='drop')
+    vx_bins = pd.qcut(df_clean['vx0'], q=20, labels=False, duplicates='drop')
+    df_clean['block_id'] = x_bins * 20 + vx_bins
+
+    rng = np.random.RandomState(seed)
+    unique_blocks = df_clean['block_id'].unique()
+    test_blocks = rng.choice(unique_blocks, size=int(len(unique_blocks) * 0.15), replace=False)
+
+    test_mask = df_clean['block_id'].isin(test_blocks).values
+
     X_raw = df_clean[["x0", "vx0"]].values
     y_raw = df_clean["label_id"].values
 
-
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y_raw)
-
     num_classes = len(label_encoder.classes_)
 
     print(f"  Classes: {label_encoder.classes_}")
-
-
-    x_mid = np.median(X_raw[:, 0])
-    vx_mid = np.median(X_raw[:, 1])
-
-    test_mask = (
-        (X_raw[:, 0] > x_mid) &
-        (X_raw[:, 1] > vx_mid)
-    )
 
     X_dev_raw = X_raw[~test_mask]
     y_dev = y_encoded[~test_mask]
 
     X_test_raw = X_raw[test_mask]
     y_test = y_encoded[test_mask]
-
 
     X_train_raw, X_val_raw, y_train, y_val = train_test_split(
         X_dev_raw,
@@ -165,13 +170,10 @@ def train_ensemble_member(
         stratify=y_dev
     )
 
-
     scaler = StandardScaler()
-
     X_train = scaler.fit_transform(X_train_raw)
     X_val = scaler.transform(X_val_raw)
     X_test = scaler.transform(X_test_raw)
-
 
     print(
         f"  Samples: "
@@ -180,221 +182,115 @@ def train_ensemble_member(
         f"test={len(X_test)}"
     )
 
+    X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+    y_train_tensor = torch.tensor(y_train, dtype=torch.long)
+    X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
+    y_val_tensor = torch.tensor(y_val, dtype=torch.long)
+    X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+    y_test_tensor = torch.tensor(y_test, dtype=torch.long)
 
-    X_train_tensor = torch.tensor(
-        X_train,
-        dtype=torch.float32
-    )
+    train_dataset = data.TensorDataset(X_train_tensor, y_train_tensor)
+    val_dataset = data.TensorDataset(X_val_tensor, y_val_tensor)
+    test_dataset = data.TensorDataset(X_test_tensor, y_test_tensor)
 
-    y_train_tensor = torch.tensor(
-        y_train,
-        dtype=torch.long
-    )
-
-    X_val_tensor = torch.tensor(
-        X_val,
-        dtype=torch.float32
-    )
-
-    y_val_tensor = torch.tensor(
-        y_val,
-        dtype=torch.long
-    )
-
-    X_test_tensor = torch.tensor(
-        X_test,
-        dtype=torch.float32
-    )
-
-    y_test_tensor = torch.tensor(
-        y_test,
-        dtype=torch.long
-    )
-
-
-    train_dataset = data.TensorDataset(
-        X_train_tensor,
-        y_train_tensor
-    )
-
-    val_dataset = data.TensorDataset(
-        X_val_tensor,
-        y_val_tensor
-    )
-
-    test_dataset = data.TensorDataset(
-        X_test_tensor,
-        y_test_tensor
-    )
-
+    # --- 2. NATURAL DATALOADER (Natural Phase Space Density) ---
     train_loader = data.DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True
     )
+    val_loader = data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    val_loader = data.DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False
-    )
+    model = BasinClassifier(input_dim=2, num_classes=num_classes).to(device)
 
-    test_loader = data.DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False
-    )
-
-    model = BasinClassifier(
-        input_dim=2,
-        num_classes=num_classes
-    ).to(device)
-
-    class_counts = np.bincount(
-        y_train,
-        minlength=num_classes
-    )
-
-    class_weights = np.sqrt(len(y_train) / (num_classes * class_counts))
-
-    class_weights = class_weights / np.mean(class_weights)
-
-    class_weights = torch.tensor(
-        class_weights,
-        dtype=torch.float32,
-        device=device
-    )
-
+    class_counts = np.bincount(y_train, minlength=num_classes)
     print("  Training class counts:")
     for class_idx, count in enumerate(class_counts):
-        print(
-            f"    Class {class_idx}: "
-            f"{count} ({count / len(y_train):.2%})"
-        )
-
-    print("  Class weights:")
-    for class_idx, weight in enumerate(class_weights.cpu().numpy()):
-        print(
-            f"    Class {class_idx}: "
-            f"{weight:.4f}"
-        )
+        print(f"    Class {class_idx}: {count} ({count / len(y_train):.2%})")
 
     test_counts = np.bincount(y_test, minlength=num_classes)
     print("  Test class counts:")
     for class_idx, count in enumerate(test_counts):
         print(f"    Class {class_idx}: {count} ({count / len(y_test):.2%})")
-    criterion = nn.CrossEntropyLoss(
-        weight=class_weights
-    )
 
+    # --- 3. DAMPENED (SQUARE-ROOT) LOSS WEIGHTS ---
+    raw_weights = np.sqrt(len(y_train) / (num_classes * class_counts))
+    class_weights = raw_weights / np.mean(raw_weights)
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32, device=device)
+
+    print("  Dampened loss weights:")
+    for class_idx, weight in enumerate(class_weights):
+        print(f"    Class {class_idx}: {weight:.4f}")
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
     test_criterion = nn.CrossEntropyLoss()
 
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=LEARNING_RATE
-    )
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_val_loss = float("inf")
     best_state = None
     epochs_without_improvement = 0
 
     for epoch in range(epochs):
-
-
         model.train()
-
         running_train_loss = 0.0
         train_correct = 0
         train_samples = 0
 
         for inputs, labels in train_loader:
-
             inputs = inputs.to(device)
             labels = labels.to(device)
 
             optimizer.zero_grad()
-
             outputs = model(inputs)
-
-            loss = criterion(
-                outputs,
-                labels
-            )
-
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
 
             batch_size_actual = inputs.size(0)
-
-            running_train_loss += (
-                loss.item() * batch_size_actual
-            )
-
-            train_correct += (
-                outputs.argmax(dim=1) == labels
-            ).sum().item()
-
+            running_train_loss += loss.item() * batch_size_actual
+            train_correct += (outputs.argmax(dim=1) == labels).sum().item()
             train_samples += batch_size_actual
 
+        scheduler.step()
 
         train_loss = running_train_loss / train_samples
         train_accuracy = train_correct / train_samples
 
-
-        val_loss, val_accuracy = evaluate(
-            model,
-            val_loader,
-            criterion
-        )
-        
-
+        # Evaluate validation loss using unweighted loss for true convergence
+        val_loss, val_accuracy = evaluate(model, val_loader, test_criterion)
 
         if val_loss < best_val_loss:
-
             best_val_loss = val_loss
-
             best_state = {
                 key: value.detach().cpu().clone()
                 for key, value in model.state_dict().items()
             }
-
             epochs_without_improvement = 0
-
         else:
             epochs_without_improvement += 1
 
-
         if (epoch + 1) % 5 == 0 or epoch == 0:
-
             print(
-                f"  [C={c_val:.2f} | "
-                f"Model {model_idx+1}/{num_ensembles}] "
+                f"  [C={c_val:.2f} | Model {model_idx+1}/{num_ensembles}] "
                 f"Epoch {epoch+1:02d}/{epochs} | "
-                f"Train Loss: {train_loss:.4f} | "
-                f"Train Acc: {train_accuracy:.4f} | "
-                f"Val Loss: {val_loss:.4f} | "
-                f"Val Acc: {val_accuracy:.4f}"
+                f"Train Loss: {train_loss:.4f} | Train Acc: {train_accuracy:.4f} | "
+                f"Val Loss: {val_loss:.4f} | Val Acc: {val_accuracy:.4f}"
             )
 
         if epochs_without_improvement >= patience:
-
             print(
                 f"  Early stopping at epoch {epoch+1} "
                 f"(best val loss = {best_val_loss:.4f})"
             )
-
             break
-
 
     model.load_state_dict(best_state)
     model.to(device)
 
-
-    test_loss, test_accuracy = evaluate(
-        model,
-        test_loader,
-        test_criterion
-    )
+    test_loss, test_accuracy = evaluate(model, test_loader, test_criterion)
 
     print(
         f"  Best Val Loss: {best_val_loss:.4f} | "
@@ -407,69 +303,44 @@ def train_ensemble_member(
         model=model,
         loader=test_loader,
         label_encoder=label_encoder,
+        device=device
     )
-
 
     return {
         "model": model,
         "scaler": scaler,
         "label_encoder": label_encoder,
-        "class_weights": class_weights.cpu().numpy(),
+        "class_weights": class_weights,
         "best_val_loss": best_val_loss,
         "test_loss": test_loss,
         "test_accuracy": test_accuracy,
         "test_bal_acc": test_bal_acc,
     }
 
-
 for C in C_VALUES:
 
     save_dir = f"files/models/{C:.2f}"
     os.makedirs(save_dir, exist_ok=True)
 
-    print(
-        f"\n==============================="
-        f"==============================="
-    )
-    print(
-        f"Training Ensemble for C = {C:.2f}"
-    )
-    print(
-        f"==============================="
-        f"==============================="
-    )
-
+    print(f"\n===============================" f"===============================")
+    print(f"Training Ensemble for C = {C:.2f}")
+    print(f"===============================" f"===============================")
 
     for i in range(num_ensembles):
 
-        result = train_ensemble_member(
-            c_val=C,
-            model_idx=i
-        )
+        result = train_ensemble_member(c_val=C, model_idx=i)
 
         model = result["model"]
 
-
-        model_path = os.path.join(
-            save_dir,
-            f"MODEL_{i}.pt"
-        )
+        model_path = os.path.join(save_dir, f"MODEL_{i}.pt")
 
         state_dict_cpu = {
-            key: value.detach().cpu()
-            for key, value in model.state_dict().items()
+            key: value.detach().cpu() for key, value in model.state_dict().items()
         }
 
-        torch.save(
-            state_dict_cpu,
-            model_path
-        )
+        torch.save(state_dict_cpu, model_path)
 
-
-        preprocessing_path = os.path.join(
-            save_dir,
-            f"MODEL_{i}_preprocessing.pt"
-        )
+        preprocessing_path = os.path.join(save_dir, f"MODEL_{i}_preprocessing.pt")
 
         torch.save(
             {
@@ -481,12 +352,8 @@ for C in C_VALUES:
                 "test_loss": result["test_loss"],
                 "test_accuracy": result["test_accuracy"],
             },
-            preprocessing_path
+            preprocessing_path,
         )
-
 
         print(f"Saved model to: {model_path}")
-        print(
-            f"Saved preprocessing to: "
-            f"{preprocessing_path}"
-        )
+        print(f"Saved preprocessing to: " f"{preprocessing_path}")
