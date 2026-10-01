@@ -1,0 +1,17 @@
+[package]
+name = "cr3bp_basins"
+version = "0.1.0"
+edition = "2024"
+include = [
+    "src/**/*",
+    "Cargo.toml",
+    "README.md",
+]
+
+[dependencies]
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
