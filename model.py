@@ -136,7 +136,6 @@ def train_ensemble_member(
 
     df_clean = df[~df["label_id"].isin([0, 4])].copy()
 
-    # --- 1. FINER SPATIAL BLOCK GRID (20x20 grid, 15% held out) ---
     x_bins = pd.qcut(df_clean['x0'], q=20, labels=False, duplicates='drop')
     vx_bins = pd.qcut(df_clean['vx0'], q=20, labels=False, duplicates='drop')
     df_clean['block_id'] = x_bins * 20 + vx_bins
@@ -193,7 +192,6 @@ def train_ensemble_member(
     val_dataset = data.TensorDataset(X_val_tensor, y_val_tensor)
     test_dataset = data.TensorDataset(X_test_tensor, y_test_tensor)
 
-    # --- 2. NATURAL DATALOADER (Natural Phase Space Density) ---
     train_loader = data.DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -214,7 +212,6 @@ def train_ensemble_member(
     for class_idx, count in enumerate(test_counts):
         print(f"    Class {class_idx}: {count} ({count / len(y_test):.2%})")
 
-    # --- 3. DAMPENED (SQUARE-ROOT) LOSS WEIGHTS ---
     raw_weights = np.sqrt(len(y_train) / (num_classes * class_counts))
     class_weights = raw_weights / np.mean(raw_weights)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32, device=device)
@@ -259,7 +256,6 @@ def train_ensemble_member(
         train_loss = running_train_loss / train_samples
         train_accuracy = train_correct / train_samples
 
-        # Evaluate validation loss using unweighted loss for true convergence
         val_loss, val_accuracy = evaluate(model, val_loader, test_criterion)
 
         if val_loss < best_val_loss:
