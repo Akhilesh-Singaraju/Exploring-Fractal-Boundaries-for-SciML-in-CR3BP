@@ -86,17 +86,23 @@ class FocalLoss(nn.Module):
     def __init__(self, alpha=None, gamma=1.0):
         super().__init__()
         self.gamma = gamma
-        self.alpha_np = alpha
+        if alpha is not None:
+            self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+        else:
+            self.alpha = None
 
     def forward(self, logits, target):
-        if self.alpha_np is not None:
-            alpha = torch.tensor(self.alpha_np, dtype=logits.dtype, device=logits.device)
-        else:
-            alpha = None
+        log_pt = -F.cross_entropy(logits, target, reduction='none')
+        pt = torch.exp(log_pt)
+        
+        focal_weight = (1.0 - pt) ** self.gamma
+        loss = focal_weight * (-log_pt)
+        
+        if self.alpha is not None:
+            if self.alpha.device != target.device:
+                self.alpha = self.alpha.to(target.device)
+            loss = self.alpha[target] * loss
             
-        ce = F.cross_entropy(logits, target, weight=alpha, reduction='none')
-        p_t = torch.exp(-ce)
-        loss = (1.0 - p_t) ** self.gamma * ce
         return loss.mean()
 
 def create_fixed_spatial_split(df, seed, n_bins=20, test_frac=0.15, val_frac=0.15):
