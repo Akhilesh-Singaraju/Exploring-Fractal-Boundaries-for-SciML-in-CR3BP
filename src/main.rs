@@ -332,6 +332,9 @@ struct CsvRow {
     min_r_earth: f64,
     min_r_moon: f64,
     max_r: f64,
+    jacobi_initial: f64,
+    jacobi_final: f64,
+    jacobi_error: f64,
 }
 
 fn read_basin_csv(path: &str) -> std::io::Result<Vec<CsvRow>> {
@@ -340,11 +343,10 @@ fn read_basin_csv(path: &str) -> std::io::Result<Vec<CsvRow>> {
     let mut rows = Vec::new();
     for (i, line) in reader.lines().enumerate() {
         let line = line?;
-        if i == 0 {
-            continue;
-        }
+        if i == 0 { continue; }
+        
         let p: Vec<&str> = line.split(',').collect();
-        if p.len() != 10 {
+        if p.len() != 13 {
             continue;
         }
         rows.push(CsvRow {
@@ -357,6 +359,9 @@ fn read_basin_csv(path: &str) -> std::io::Result<Vec<CsvRow>> {
             min_r_earth: p[7].parse().unwrap(),
             min_r_moon: p[8].parse().unwrap(),
             max_r: p[9].parse().unwrap(),
+            jacobi_initial: p[10].parse().unwrap(),
+            jacobi_final: p[11].parse().unwrap(),
+            jacobi_error: p[12].parse().unwrap(),
         });
     }
     Ok(rows)
