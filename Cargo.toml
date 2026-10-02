@@ -10,6 +10,7 @@ include = [
 
 [dependencies]
 rayon = "1.10"
+ivp = "0.6"
 
 [profile.release]
 opt-level = 3

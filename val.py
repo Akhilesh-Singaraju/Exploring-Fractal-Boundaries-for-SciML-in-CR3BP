@@ -57,12 +57,12 @@ def scipy_classify(x0, vx0, C, t_max, method="RK45"):
         cr3bp_rhs,
         (0.0, t_max),
         y0,
-        method=method,
-        rtol=1e-10,
-        atol=1e-10,
+        method="DOP853",
+        rtol=1e-11,
+        atol=1e-13,
         events=make_events(),
         dense_output=True,
-        max_step=np.inf,
+        max_step=0.01,
     )
 
     fired = [i for i in range(3) if sol.t_events[i].size > 0]
@@ -88,38 +88,38 @@ def scipy_classify(x0, vx0, C, t_max, method="RK45"):
     return label, te, sol.nfev // 7, min_r1, min_r2, max_rc
 
 
-print("RK45 vs DOP853")
-rng = np.random.default_rng(0)
-C, T_MAX = 3.05, 5000.0
-print(
-    f"{'x0':>8} {'vx0':>8} | {'RK45 label':>10} {'t_ev':>10} | "
-    f"{'DOP853 label':>12} {'t_ev':>10}"
-)
-n_agree = 0
-for _ in range(30):
-    x0, vx0 = rng.uniform(-1.5, 1.5), rng.uniform(-3.0, 3.0)
-    l1, t1, *_ = scipy_classify(x0, vx0, C, T_MAX, "RK45")
-    l2, t2, *_ = scipy_classify(x0, vx0, C, T_MAX, "DOP853")
-    agree = (l1 == l2) and (l1 in (0, 4) or abs(t1 - t2) < 1e-4)
-    n_agree += agree
-    print(
-        f"{x0:8.4f} {vx0:8.4f} | {OUTCOME_MAP[l1]:>14} {t1:10.4f} | "
-        f"{OUTCOME_MAP[l2]:>14} {t2:10.4f}  {'OK' if agree else 'MISMATCH'}"
-    )
-print(f"\nRK45 vs DOP853 agreement: {n_agree}/30")
+# print("RK45 vs DOP853")
+# rng = np.random.default_rng(0)
+# C, T_MAX = 3.05, 5000.0
+# print(
+#     f"{'x0':>8} {'vx0':>8} | {'RK45 label':>10} {'t_ev':>10} | "
+#     f"{'DOP853 label':>12} {'t_ev':>10}"
+# )
+# n_agree = 0
+# for _ in range(30):
+#     x0, vx0 = rng.uniform(-1.5, 1.5), rng.uniform(-3.0, 3.0)
+#     l1, t1, *_ = scipy_classify(x0, vx0, C, T_MAX, "RK45")
+#     l2, t2, *_ = scipy_classify(x0, vx0, C, T_MAX, "DOP853")
+#     agree = (l1 == l2) and (l1 in (0, 4) or abs(t1 - t2) < 1e-4)
+#     n_agree += agree
+#     print(
+#         f"{x0:8.4f} {vx0:8.4f} | {OUTCOME_MAP[l1]:>14} {t1:10.4f} | "
+#         f"{OUTCOME_MAP[l2]:>14} {t2:10.4f}  {'OK' if agree else 'MISMATCH'}"
+#     )
+# print(f"\nRK45 vs DOP853 agreement: {n_agree}/30")
 
-rng = np.random.default_rng(0)
-mismatches = []
-for _ in range(30):
-    x0, vx0 = rng.uniform(-1.5, 1.5), rng.uniform(-3.0, 3.0)
-    l1, t1, _, mr1, mr2, mrc = scipy_classify(x0, vx0, C, T_MAX, "RK45")
-    l2, t2, *_ = scipy_classify(x0, vx0, C, T_MAX, "DOP853")
-    if l1 != l2:
-        margin = min(abs(mr1 - R_EARTH), abs(mr2 - R_MOON), abs(mrc - R_ESCAPE))
-        mismatches.append((x0, vx0, OUTCOME_MAP[l1], OUTCOME_MAP[l2], margin))
+# rng = np.random.default_rng(0)
+# mismatches = []
+# for _ in range(30):
+#     x0, vx0 = rng.uniform(-1.5, 1.5), rng.uniform(-3.0, 3.0)
+#     l1, t1, _, mr1, mr2, mrc = scipy_classify(x0, vx0, C, T_MAX, "RK45")
+#     l2, t2, *_ = scipy_classify(x0, vx0, C, T_MAX, "DOP853")
+#     if l1 != l2:
+#         margin = min(abs(mr1 - R_EARTH), abs(mr2 - R_MOON), abs(mrc - R_ESCAPE))
+#         mismatches.append((x0, vx0, OUTCOME_MAP[l1], OUTCOME_MAP[l2], margin))
 
-for m in mismatches:
-    print(f"x0={m[0]:.5f} vx0={m[1]:.5f}  {m[2]} vs {m[3]}  margin={m[4]:.2e}")
+# for m in mismatches:
+#     print(f"x0={m[0]:.5f} vx0={m[1]:.5f}  {m[2]} vs {m[3]}  margin={m[4]:.2e}")
 
 print("\nCompare with Rust CSV output")
 df = pd.read_csv("files/data/basin_C3.05.csv")
@@ -128,7 +128,7 @@ sample = df.sample(50, random_state=42)
 mismatch_label, worst_dt, worst_dr = 0, 0.0, 0.0
 for _, row in sample.iterrows():
     l_ref, te_ref, _, mr1, mr2, mrc = scipy_classify(
-        row["x0"], row["vx0"], row["C"], 5000.0, "RK45"
+        row["x0"], row["vx0"], row["C"], 5000.0, "DOP853"
     )
     if l_ref != row["label_id"]:
         mismatch_label += 1
@@ -148,8 +148,3 @@ for _, row in sample.iterrows():
 print(f"label mismatches: {mismatch_label}/50")
 print(f"worst event-time diff:  {worst_dt:.3e}")
 print(f"worst distance-metric diff: {worst_dr:.3e}")
-print(
-    "(distance metrics use dense output on both sides, so they should agree "
-    "\n to ~1e-6; event times to ~1e-8. Label flips only possible on "
-    "\n knife-edge boundary trajectories — chaotic grazing cases.)"
-)

@@ -1,3 +1,4 @@
+use ivp::prelude::*;
 use rayon::prelude::*;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -15,173 +16,60 @@ const OUTCOMES: [&str; 5] = [
     "MAX_TIME",
 ];
 
-const RTOL: f64 = 1e-10;
-const ATOL: f64 = 1e-10;
-const MAX_STEPS: u64 = 200_000;
+const RTOL: f64 = 1e-11;
+const ATOL: f64 = 1e-13;
 
-#[inline]
-fn cr3bp_rhs(_t: f64, y: &[f64; 4]) -> [f64; 4] {
-    let (x, yy, vx, vy) = (y[0], y[1], y[2], y[3]);
-    let dx1 = x + MU;
-    let dx2 = x - 1.0 + MU;
-    let r1_sq = dx1 * dx1 + yy * yy;
-    let r2_sq = dx2 * dx2 + yy * yy;
+const MAX_STEP: f64 = 0.01;
 
-    let r1_3 = r1_sq * r1_sq.sqrt();
-    let r2_3 = r2_sq * r2_sq.sqrt();
+struct Cr3bpSystem;
 
-    let domega_dx = x - (1.0 - MU) * dx1 / r1_3 - MU * dx2 / r2_3;
-    let domega_dy = yy - (1.0 - MU) * yy / r1_3 - MU * yy / r2_3;
+impl FirstOrderSystem for Cr3bpSystem {
+    fn derivative(&self, _t: f64, y: &[f64], dydx: &mut [f64]) {
+        let (x, yy, vx, vy) = (y[0], y[1], y[2], y[3]);
+        let dx1 = x + MU;
+        let dx2 = x - 1.0 + MU;
+        let r1_sq = dx1 * dx1 + yy * yy;
+        let r2_sq = dx2 * dx2 + yy * yy;
 
-    [vx, vy, domega_dx + 2.0 * vy, domega_dy - 2.0 * vx]
-}
+        let r1_3 = r1_sq * r1_sq.sqrt();
+        let r2_3 = r2_sq * r2_sq.sqrt();
 
-#[inline]
-fn event_triggered(y: &[f64; 4]) -> bool {
-    let (x, yy) = (y[0], y[1]);
-    let r1_sq = (x + MU) * (x + MU) + yy * yy;
-    let r2_sq = (x - 1.0 + MU) * (x - 1.0 + MU) + yy * yy;
-    let rc_sq = x * x + yy * yy;
-    r1_sq <= R_EARTH * R_EARTH || r2_sq <= R_MOON * R_MOON || rc_sq >= R_ESCAPE * R_ESCAPE
-}
+        let domega_dx = x - (1.0 - MU) * dx1 / r1_3 - MU * dx2 / r2_3;
+        let domega_dy = yy - (1.0 - MU) * yy / r1_3 - MU * yy / r2_3;
 
-#[inline]
-fn update_extremes(y: &[f64; 4], min_r1: &mut f64, min_r2: &mut f64, max_rc: &mut f64) {
-    let (x, yy) = (y[0], y[1]);
-    let r1 = ((x + MU) * (x + MU) + yy * yy).sqrt();
-    let r2 = ((x - 1.0 + MU) * (x - 1.0 + MU) + yy * yy).sqrt();
-    let rc = (x * x + yy * yy).sqrt();
-    if r1 < *min_r1 {
-        *min_r1 = r1;
+        dydx[0] = vx;
+        dydx[1] = vy;
+        dydx[2] = domega_dx + 2.0 * vy;
+        dydx[3] = domega_dy - 2.0 * vx;
     }
-    if r2 < *min_r2 {
-        *min_r2 = r2;
+
+    fn events(&self, _t: f64, y: &[f64], out: &mut [f64]) {
+        let (x, yy) = (y[0], y[1]);
+        let r1 = ((x + MU) * (x + MU) + yy * yy).sqrt();
+        let r2 = ((x - 1.0 + MU) * (x - 1.0 + MU) + yy * yy).sqrt();
+        let rc = (x * x + yy * yy).sqrt();
+        out[0] = r1 - R_EARTH;
+        out[1] = r2 - R_MOON;
+        out[2] = rc - R_ESCAPE;
     }
-    if rc > *max_rc {
-        *max_rc = rc;
+
+    fn n_events(&self) -> usize {
+        3
     }
-}
 
-#[allow(clippy::excessive_precision)]
-fn dopri5_step(t: f64, y: &[f64; 4], k1: &[f64; 4], dt: f64) -> ([f64; 4], [f64; 4], [f64; 4]) {
-    let mut ys = [0.0f64; 4];
-    let mut k = [[0.0f64; 4]; 7];
-    k[0] = *k1;
-
-    for i in 0..4 {
-        ys[i] = y[i] + dt * 0.2 * k[0][i];
-    }
-    k[1] = cr3bp_rhs(t + 0.2 * dt, &ys);
-
-    for i in 0..4 {
-        ys[i] = y[i] + dt * (3.0 / 40.0 * k[0][i] + 9.0 / 40.0 * k[1][i]);
-    }
-    k[2] = cr3bp_rhs(t + 0.3 * dt, &ys);
-
-    for i in 0..4 {
-        ys[i] = y[i]
-            + dt * (44.0 / 45.0 * k[0][i] - 56.0 / 15.0 * k[1][i] + 32.0 / 9.0 * k[2][i]);
-    }
-    k[3] = cr3bp_rhs(t + 0.8 * dt, &ys);
-
-    for i in 0..4 {
-        ys[i] = y[i]
-            + dt * (19372.0 / 6561.0 * k[0][i] - 25360.0 / 2187.0 * k[1][i]
-                + 64448.0 / 6561.0 * k[2][i]
-                - 212.0 / 729.0 * k[3][i]);
-    }
-    k[4] = cr3bp_rhs(t + (8.0 / 9.0) * dt, &ys);
-
-    for i in 0..4 {
-        ys[i] = y[i]
-            + dt * (9017.0 / 3168.0 * k[0][i] - 355.0 / 33.0 * k[1][i]
-                + 46732.0 / 5247.0 * k[2][i]
-                + 49.0 / 176.0 * k[3][i]
-                - 5103.0 / 18656.0 * k[4][i]);
-    }
-    k[5] = cr3bp_rhs(t + dt, &ys);
-
-    for i in 0..4 {
-        ys[i] = y[i]
-            + dt * (35.0 / 384.0 * k[0][i] + 500.0 / 1113.0 * k[2][i]
-                + 125.0 / 192.0 * k[3][i]
-                - 2187.0 / 6784.0 * k[4][i]
-                + 11.0 / 84.0 * k[5][i]);
-    }
-    k[6] = cr3bp_rhs(t + dt, &ys);
-
-    let y_new = ys;
-
-    let mut err = [0.0f64; 4];
-    for i in 0..4 {
-        err[i] = dt * (71.0 / 57600.0 * k[0][i]
-            - 71.0 / 16695.0 * k[2][i]
-            + 71.0 / 1920.0 * k[3][i]
-            - 17253.0 / 339200.0 * k[4][i]
-            + 22.0 / 525.0 * k[5][i]
-            - 1.0 / 40.0 * k[6][i]);
-    }
-    (y_new, k[6], err)
-}
-
-fn error_norm(y: &[f64; 4], y_new: &[f64; 4], err: &[f64; 4]) -> f64 {
-    let mut sum = 0.0;
-    for i in 0..4 {
-        let sc = ATOL + RTOL * y[i].abs().max(y_new[i].abs());
-        sum += (err[i] / sc).powi(2);
-    }
-    (sum / 4.0).sqrt()
-}
-
-fn hermite(y0: &[f64; 4], f0: &[f64; 4], y1: &[f64; 4], f1: &[f64; 4], h: f64, s: f64) -> [f64; 4] {
-    let h00 = 2.0 * s * s * s - 3.0 * s * s + 1.0;
-    let h10 = s * s * s - 2.0 * s * s + s;
-    let h01 = -2.0 * s * s * s + 3.0 * s * s;
-    let h11 = s * s * s - s * s;
-    let mut out = [0.0f64; 4];
-    for i in 0..4 {
-        out[i] = h00 * y0[i] + h10 * h * f0[i] + h01 * y1[i] + h11 * h * f1[i];
-    }
-    out
-}
-
-fn refine_event(
-    t0: f64,
-    t1: f64,
-    y0: &[f64; 4],
-    f0: &[f64; 4],
-    y1: &[f64; 4],
-    f1: &[f64; 4],
-) -> ([f64; 4], f64) {
-    let h = t1 - t0;
-    let mut lo = 0.0f64;
-    let mut hi = 1.0f64;
-    let mut mid = 0.5f64;
-    for _ in 0..60 {
-        mid = 0.5 * (lo + hi);
-        let ym = hermite(y0, f0, y1, f1, h, mid);
-        if event_triggered(&ym) {
-            hi = mid;
-        } else {
-            lo = mid;
+    fn event_config(&self, index: usize) -> EventConfig {
+        let mut cfg = EventConfig::default();
+        cfg.terminal();
+        match index {
+            0 | 1 => cfg.negative(),
+            _ => cfg.positive(),
         }
+        cfg
     }
-    (hermite(y0, f0, y1, f1, h, hi), t0 + hi * h)
-}
-
-
-#[derive(Clone, Copy, Debug)]
-pub struct Solution {
-    pub label: u8,
-    pub t_event: f64,
-    pub n_steps: u64,
-    pub min_r1: f64,
-    pub min_r2: f64,
-    pub max_rc: f64,
 }
 
 #[inline]
-fn classify(final_state: &[f64; 4], valid: bool) -> u8 {
+fn classify(final_state: &[f64], valid: bool) -> u8 {
     let (x_f, y_f) = (final_state[0], final_state[1]);
     let r1_f = ((x_f + MU) * (x_f + MU) + y_f * y_f).sqrt();
     let r2_f = ((x_f - 1.0 + MU) * (x_f - 1.0 + MU) + y_f * y_f).sqrt();
@@ -200,97 +88,153 @@ fn classify(final_state: &[f64; 4], valid: bool) -> u8 {
     }
 }
 
+#[inline]
+fn update_extremes(y: &[f64], min_r1: &mut f64, min_r2: &mut f64, max_rc: &mut f64) {
+    let (x, yy) = (y[0], y[1]);
+    let r1 = ((x + MU) * (x + MU) + yy * yy).sqrt();
+    let r2 = ((x - 1.0 + MU) * (x - 1.0 + MU) + yy * yy).sqrt();
+    let rc = (x * x + yy * yy).sqrt();
+    if r1 < *min_r1 {
+        *min_r1 = r1;
+    }
+    if r2 < *min_r2 {
+        *min_r2 = r2;
+    }
+    if rc > *max_rc {
+        *max_rc = rc;
+    }
+}
+
+
+#[derive(Clone, Copy, Debug)]
+pub struct Solution {
+    pub label: u8,
+    pub t_event: f64,
+    pub n_steps: u64,
+    pub min_r1: f64,
+    pub min_r2: f64,
+    pub max_rc: f64,
+    pub jacobi_initial: f64,
+    pub jacobi_final: f64,
+    pub jacobi_error: f64,
+}
+
 pub fn solve_single(x0: f64, vx0: f64, jacobi_c: f64, t_max: f64) -> Solution {
     let r1_0 = (x0 + MU).abs();
     let r2_0 = (x0 - 1.0 + MU).abs();
 
     let omega0 = 0.5 * x0 * x0 + (1.0 - MU) / r1_0 + MU / r2_0;
     let vy2 = 2.0 * omega0 - jacobi_c - vx0 * vx0;
-    let valid = vy2 >= 0.0;
-    let vy0 = if valid { vy2.max(0.0).sqrt() } else { 0.0 };
 
-    let mut y = [x0, 0.0, vx0, vy0];
-    let mut t = 0.0f64;
-    let mut dt = 0.01f64;
-    let mut f = cr3bp_rhs(t, &y);
-    let mut n_accepted: u64 = 0;
+    if vy2 < 0.0 {
+        return Solution {
+            label: 0,
+            t_event: 0.0,
+            n_steps: 0,
+            min_r1: r1_0,
+            min_r2: r2_0,
+            max_rc: x0.abs(),
+            jacobi_initial: jacobi_c,
+            jacobi_final: jacobi_c,
+            jacobi_error: 0.0,
+        };
+    }
+
+    let vy0 = vy2.sqrt();
+    let y0 = [x0, 0.0, vx0, vy0];
+
+    {
+        let (x, yy) = (y0[0], y0[1]);
+        let r1 = ((x + MU) * (x + MU) + yy * yy).sqrt();
+        let r2 = ((x - 1.0 + MU) * (x - 1.0 + MU) + yy * yy).sqrt();
+        let rc = (x * x + yy * yy).sqrt();
+        if r1 <= R_EARTH || r2 <= R_MOON || rc >= R_ESCAPE {
+            let label = classify(&y0, true);
+            return Solution {
+                label,
+                t_event: 0.0,
+                n_steps: 0,
+                min_r1: r1,
+                min_r2: r2,
+                max_rc: rc,
+                jacobi_initial: jacobi_c,
+                jacobi_final: jacobi_c,
+                jacobi_error: 0.0,
+            };
+        }
+    }
+
+    let max_steps = (((t_max / MAX_STEP).ceil() as usize) * 2).clamp(10_000, 20_000_000);
+
+    let system = Cr3bpSystem;
+    let sol = Ivp::first_order(&system, 0.0, t_max, &y0)
+        .method(Method::DOP853)
+        .rtol(RTOL)
+        .atol(ATOL)
+        .max_step(MAX_STEP)
+        .max_steps(max_steps)
+        .solve()
+        .expect("DOP853 integration failed");
+
+    const EVENT_LABELS: [u8; 3] = [1, 2, 3]; // Earth, Moon, Escape
+    let mut earliest: Option<(usize, f64)> = None;
+    for idx in 0..3 {
+        if let Some(&te) = sol.t_events.get(idx).and_then(|v| v.first()) {
+            match earliest {
+                Some((_, t)) if te >= t => {}
+                _ => earliest = Some((idx, te)),
+            }
+        }
+    }
+
+    let (label, t_event, final_state): (u8, f64, Vec<f64>) = match earliest {
+        Some((idx, te)) => {
+            let ys = sol
+                .y_events
+                .get(idx)
+                .and_then(|v| v.first())
+                .cloned()
+                .unwrap_or_else(|| y0.to_vec());
+            (EVENT_LABELS[idx], te, ys)
+        }
+        None => {
+            let fs = sol.y.last().cloned().unwrap_or_else(|| y0.to_vec());
+            let ft = sol.t.last().copied().unwrap_or(0.0);
+            (classify(&fs, true), ft, fs)
+        }
+    };
 
     let mut min_r1 = f64::INFINITY;
     let mut min_r2 = f64::INFINITY;
     let mut max_rc = 0.0f64;
-    update_extremes(&y, &mut min_r1, &mut min_r2, &mut max_rc);
 
-    let mut final_state = y;
-    let mut final_t = 0.0f64;
-    let mut terminated_by_event = event_triggered(&y);
-
-    if !terminated_by_event {
-        let mut iterations: u64 = 0;
-        while n_accepted < MAX_STEPS && iterations < 4 * MAX_STEPS {
-            iterations += 1;
-            if t >= t_max {
-                break;
-            }
-            let mut h = dt;
-            if t + h > t_max {
-                h = t_max - t;
-            }
-            if h < 1e-14 {
-                break;
-            }
-
-            let (y_new, f_new, err) = dopri5_step(t, &y, &f, h);
-
-            if !y_new.iter().all(|v| v.is_finite()) || !err.iter().all(|v| v.is_finite()) {
-                dt = h * 0.1;
-                continue;
-            }
-
-            let en = error_norm(&y, &y_new, &err);
-
-            if en <= 1.0 {
-                n_accepted += 1;
-                if event_triggered(&y_new) {
-                    let (yc, tc) = refine_event(t, t + h, &y, &f, &y_new, &f_new);
-                    final_state = yc;
-                    final_t = tc;
-                    update_extremes(&yc, &mut min_r1, &mut min_r2, &mut max_rc);
-                    terminated_by_event = true;
-                    break;
-                }
-                t += h;
-                y = y_new;
-                f = f_new;
-                update_extremes(&y, &mut min_r1, &mut min_r2, &mut max_rc);
-                let fac = if en == 0.0 {
-                    5.0
-                } else {
-                    (0.9 * en.powf(-0.2)).clamp(0.2, 5.0)
-                };
-                dt = h * fac;
-            } else {
-                let fac = if en.is_finite() {
-                    (0.9 * en.powf(-0.2)).max(0.1)
-                } else {
-                    0.1
-                };
-                dt = h * fac;
-            }
-        }
-        if !terminated_by_event {
-            final_state = y;
-            final_t = t;
+    for (i, y) in sol.y.iter().enumerate() {
+        if sol.t[i] <= t_event + 1e-12 {
+            update_extremes(y, &mut min_r1, &mut min_r2, &mut max_rc);
         }
     }
+    if !final_state.is_empty() {
+        update_extremes(&final_state, &mut min_r1, &mut min_r2, &mut max_rc);
+    }
 
-    let label = classify(&final_state, valid);
+    let (xf, yf, vxf, vyf) = (final_state[0], final_state[1], final_state[2], final_state[3]);
+    let r1_f = ((xf + MU).powi(2) + yf * yf).sqrt();
+    let r2_f = ((xf - 1.0 + MU).powi(2) + yf * yf).sqrt();
+    let omega_f = 0.5 * (xf * xf + yf * yf) + (1.0 - MU) / r1_f + MU / r2_f;
+    
+    let jacobi_final = 2.0 * omega_f - (vxf * vxf + vyf * vyf);
+    let jacobi_error = (jacobi_final - jacobi_c).abs();
+
     Solution {
         label,
-        t_event: final_t,
-        n_steps: n_accepted,
+        t_event,
+        n_steps: sol.naccpt as u64,
         min_r1,
         min_r2,
         max_rc,
+        jacobi_initial: jacobi_c,
+        jacobi_final,
+        jacobi_error,
     }
 }
 
@@ -312,6 +256,9 @@ struct GridRow {
     min_r_earth: f64,
     min_r_moon: f64,
     max_r: f64,
+    jacobi_initial: f64,
+    jacobi_final: f64,
+    jacobi_error: f64,
 }
 
 fn linspace(a: f64, b: f64, n: usize) -> Vec<f64> {
@@ -351,6 +298,9 @@ fn generate_basin_grid(
                 min_r_earth: s.min_r1,
                 min_r_moon: s.min_r2,
                 max_r: s.max_rc,
+                jacobi_initial: s.jacobi_initial,
+                jacobi_final: s.jacobi_final,
+                jacobi_error: s.jacobi_error,
             }
         })
         .collect()
@@ -358,13 +308,14 @@ fn generate_basin_grid(
 
 fn write_basin_csv(path: &str, rows: &[GridRow]) -> std::io::Result<()> {
     let mut w = BufWriter::new(fs::File::create(path)?);
-    writeln!(w, "x0,vx0,C,label_id,outcome,t_event,n_steps,min_r_earth,min_r_moon,max_r")?;
+    writeln!(w, "x0,vx0,C,label_id,outcome,t_event,n_steps,min_r_earth,min_r_moon,max_r,jacobi_initial,jacobi_final,jacobi_error")?;
     for r in rows {
         writeln!(
             w,
-            "{:?},{:?},{:?},{},{},{:?},{},{:?},{:?},{:?}",
+            "{:.17e},{:.17e},{:.17e},{},{},{:.17e},{},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
             r.x0, r.vx0, r.c, r.label_id, OUTCOMES[r.label_id as usize],
-            r.t_event, r.n_steps, r.min_r_earth, r.min_r_moon, r.max_r
+            r.t_event, r.n_steps, r.min_r_earth, r.min_r_moon, r.max_r,
+            r.jacobi_initial, r.jacobi_final, r.jacobi_error
         )?;
     }
     Ok(())
@@ -503,6 +454,9 @@ pub fn analyze_convergence(filepath: &str, max_samples: usize) {
                 min_r_earth: s.min_r1,
                 min_r_moon: s.min_r2,
                 max_r: s.max_rc,
+                jacobi_initial: s.jacobi_initial,
+                jacobi_final: s.jacobi_final,
+                jacobi_error: s.jacobi_error,
             });
         }
     }
@@ -605,6 +559,6 @@ pub fn run_batch_generation(t_val: f64) {
 }
 
 fn main() {
-    // pre_test_convergence(3.00, &[500.0, 1000.0, 5000.0, 10000.0, 12000.0],1000)
+    // pre_test_convergence(3.00, &[500.0, 1000.0, 5000.0, 10000.0, 12000.0], 1000);
     run_batch_generation(5000.0);
 }
