@@ -1,7 +1,3 @@
-"""
-Full-grid ensemble epistemic uncertainty maps + visualization.
-Produces files/data/uncertainty_C{C}.csv and files/plots/uncertainty_C{C}.png
-"""
 import os
 import numpy as np
 import pandas as pd
@@ -18,7 +14,7 @@ NUM_ENSEMBLE = 5
 C_VALUES = [3.00, 3.05, 3.10, 3.14]
 DATA_DIR = "files/data"
 MODEL_DIR = "files/models"
-PLOT_DIR = "files/plots"
+PLOT_DIR = "files/figures"
 
 class FourierFeatures(nn.Module):
     def __init__(self, in_dim=2, num_features=256, scale=5.0, seed=0):
@@ -60,7 +56,7 @@ class BasinClassifier(nn.Module):
 
 def load_ensemble(C):
     save_dir = os.path.join(MODEL_DIR, f"{C:.2f}")
-    pre = torch.load(os.path.join(save_dir, "preprocessing.pt"), map_location="cpu")
+    pre = torch.load(os.path.join(save_dir, "preprocessing.pt"), map_location="cpu", weights_only=False)
     mean, scale = pre["scaler_mean"], pre["scaler_scale"]
     classes = pre["label_classes"]
     split_seed = 42 + int(C * 100)
@@ -71,7 +67,7 @@ def load_ensemble(C):
             input_dim=2, num_classes=len(classes), hidden=256, n_blocks=3,
             ff_dim=256, ff_scale=5.0, ff_seed=split_seed + i + 1,
         )
-        sd = torch.load(os.path.join(save_dir, f"MODEL_{i}.pt"), map_location="cpu")
+        sd = torch.load(os.path.join(save_dir, f"MODEL_{i}.pt"), map_location="cpu", weights_only=False)
         m.load_state_dict(sd)
         m.eval()
         models.append(m)
@@ -133,7 +129,7 @@ def plot_uncertainty_maps(C, phys):
 
     g_epi = phys.pivot(index="vx0", columns="x0", values="epi_uncertainty")
     im = axes[2].imshow(g_epi.values, origin="lower", extent=extent, aspect="auto",
-                        cmap="hot", vmax=np.percentile(g_epi.values, 99))
+                    cmap="hot", vmin=0, vmax=np.percentile(g_epi.values, 99))
     axes[2].set_title("Epistemic uncertainty (mutual information)")
     plt.colorbar(im, ax=axes[2], fraction=0.046)
 
