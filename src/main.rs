@@ -562,25 +562,87 @@ pub fn run_batch_generation(t_val: f64) {
         println!("Saved: {}", output_path);
     }
 }
+fn jacobi_constant(x: f64, y: f64, vx: f64, vy: f64) -> f64 {
+    let dx1 = x + MU;
+    let dx2 = x - 1.0 + MU;
+    let r1 = (dx1 * dx1 + y * y).sqrt();
+    let r2 = (dx2 * dx2 + y * y).sqrt();
+    let omega = 0.5 * (x * x + y * y) + (1.0 - MU) / r1 + MU / r2;
+    2.0 * omega - (vx * vx + vy * vy)
+}
 
 pub fn diagnose_single(x0: f64, vx0: f64, c: f64, t_max: f64) {
     println!("\n=== SINGLE TRAJECTORY DIAGNOSTIC ===");
     println!("x0={:.10}, vx0={:.10}, C={}, t_max={}", x0, vx0, c, t_max);
 
+    let r1_0 = (x0 + MU).abs();
+    let r2_0 = (x0 - 1.0 + MU).abs();
+    let omega0 = 0.5 * x0 * x0 + (1.0 - MU) / r1_0 + MU / r2_0;
+    let vy2 = 2.0 * omega0 - c - vx0 * vx0;
+
+    if vy2 < 0.0 {
+        println!("INVALID_ENERGY");
+        return;
+    }
+
+    let vy0 = vy2.sqrt();
+    let y0 = [x0, 0.0, vx0, vy0];
+    let jacobi_init = jacobi_constant(x0, 0.0, vx0, vy0);
+
+    let max_steps = (((t_max / MAX_STEP).ceil() as usize) * 2).clamp(10_000, 20_000_000);
+    let system = Cr3bpSystem;
+
     let start = std::time::Instant::now();
-    let sol = solve_single(x0, vx0, c, t_max);
+    let sol = Ivp::first_order(&system, 0.0, t_max, &y0)
+        .method(Method::DOP853)
+        .rtol(RTOL)
+        .atol(ATOL)
+        .max_step(MAX_STEP)
+        .max_steps(max_steps)
+        .dense_output(true) 
+        .solve()
+        .expect("DOP853 integration failed");
     let elapsed = start.elapsed();
 
-    println!("Label:       {} ({})", OUTCOMES[sol.label as usize], sol.label);
-    println!("t_event:     {:.17e}", sol.t_event);
-    println!("n_steps:     {}", sol.n_steps);
-    println!("min_r_earth: {:.17e}", sol.min_r1);
-    println!("min_r_moon:  {:.17e}", sol.min_r2);
-    println!("max_r:       {:.17e}", sol.max_rc);
-    println!("Jacobi init: {:.17e}", sol.jacobi_initial);
-    println!("Jacobi final:{:.17e}", sol.jacobi_final);
-    println!("Jacobi error:{:.3e}", sol.jacobi_error);
+    const EVENT_LABELS: [u8; 3] = [1, 2, 3];
+    let mut earliest: Option<(usize, f64)> = None;
+    for idx in 0..3 {
+        if let Some(&te) = sol.t_events.get(idx).and_then(|v| v.first()) {
+            match earliest {
+                Some((_, t)) if te >= t => {}
+                _ => earliest = Some((idx, te)),
+            }
+        }
+    }
+
+    let (label, t_event) = match earliest {
+        Some((idx, te)) => (EVENT_LABELS[idx], te),
+        None => {
+            let fs = sol.y.last().cloned().unwrap_or_else(|| y0.to_vec());
+            (classify(&fs, true), sol.t.last().copied().unwrap_or(t_max))
+        }
+    };
+
+    println!("Label:       {} ({})", OUTCOMES[label as usize], label);
+    println!("t_event:     {:.17e}", t_event);
+    println!("n_steps:     {}", sol.naccpt);
+    println!("Jacobi init: {:.17e}", jacobi_init);
     println!("Wall time:   {:?}", elapsed);
+
+    println!("\n--- RUST TRAJECTORY SAMPLES ---");
+    println!("{:>8}  {:>24}  {:>24}  {:>24}  {:>24}  {:>24}",
+             "t", "x", "y", "vx", "vy", "C");
+
+    for &t_check in &[0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 300.0] {
+        if t_check <= t_event {
+            let y = sol.sol(t_check).expect("dense output interpolation failed");
+            let c_now = jacobi_constant(y[0], y[1], y[2], y[3]);
+            println!(
+                "{:8.3}  {:+.15e}  {:+.15e}  {:+.15e}  {:+.15e}  {:.15e}",
+                t_check, y[0], y[1], y[2], y[3], c_now
+            );
+        }
+    }
     println!("====================================\n");
 }
 

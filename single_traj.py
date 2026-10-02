@@ -25,55 +25,60 @@ def make_events():
     hit_earth.terminal = hit_moon.terminal = escape.terminal = True
     return [hit_earth, hit_moon, escape]
 
-def diagnose_scipy(x0, vx0, C, t_max):
-    r1_0 = abs(x0 + MU)
-    r2_0 = abs(x0 - 1 + MU)
-    omega0 = 0.5 * x0**2 + (1 - MU) / r1_0 + MU / r2_0
-    vy2 = 2 * omega0 - C - vx0**2
-    if vy2 < 0:
-        print("INVALID_ENERGY"); return
-    y0 = [x0, 0.0, vx0, np.sqrt(vy2)]
+def jacobi_constant(s):
+    x, y, vx, vy = s
+    dx1, dx2 = x + MU, x - 1 + MU
+    r1 = np.hypot(dx1, y)
+    r2 = np.hypot(dx2, y)
+    omega = 0.5 * (x**2 + y**2) + (1 - MU) / r1 + MU / r2
+    return 2 * omega - (vx**2 + vy**2)
 
-    sol = solve_ivp(
-        cr3bp_rhs, (0.0, t_max), y0,
-        method="DOP853",
-        rtol=1e-11, atol=1e-13,
-        events=make_events(),
-        dense_output=True,
-        max_step=0.01,
-    )
+x0, vx0, C, t_max = 0.065217, -2.177258, 3.05, 5000.0
 
-    fired = [i for i in range(3) if sol.t_events[i].size > 0]
-    label_map = {0: "IMPACT_EARTH", 1: "IMPACT_MOON", 2: "ESCAPE"}
-    if fired:
-        i = min(fired, key=lambda k: sol.t_events[k][0])
-        te = sol.t_events[i][0]
-        yf = sol.sol(te)
-        label = label_map[i]
-    else:
-        te, yf = sol.t[-1], sol.y[:, -1]
-        label = "MAX_TIME"
+r1_0 = abs(x0 + MU)
+r2_0 = abs(x0 - 1 + MU)
+omega0 = 0.5 * x0**2 + (1 - MU) / r1_0 + MU / r2_0
+vy2 = 2 * omega0 - C - vx0**2
+y0 = [x0, 0.0, vx0, np.sqrt(vy2)]
 
-    ts = np.linspace(0.0, te, 4001)
-    ys = sol.sol(ts)
-    min_r1 = np.min(np.hypot(ys[0] + MU, ys[1]))
-    min_r2 = np.min(np.hypot(ys[0] - 1 + MU, ys[1]))
-    max_rc = np.max(np.hypot(ys[0], ys[1]))
+sol = solve_ivp(
+    cr3bp_rhs,
+    (0.0, t_max),
+    y0,
+    method="DOP853",       
+    rtol=1e-11,            
+    atol=1e-13,            
+    max_step=0.01,         
+    events=make_events(),
+    dense_output=True,
+)
 
-    jacobi_init = 2 * omega0 - (vx0**2 + y0[3]**2)
-    omega_f = 0.5*(yf[0]**2 + yf[1]**2) + (1-MU)/np.hypot(yf[0]+MU, yf[1]) + MU/np.hypot(yf[0]-1+MU, yf[1])
-    jacobi_final = 2*omega_f - (yf[2]**2 + yf[3]**2)
+fired = [i for i in range(3) if sol.t_events[i].size > 0]
+label_map = {0: "IMPACT_EARTH", 1: "IMPACT_MOON", 2: "ESCAPE"}
+if fired:
+    i = min(fired, key=lambda k: sol.t_events[k][0])
+    te = sol.t_events[i][0]
+    label = label_map[i]
+else:
+    te = sol.t[-1]
+    label = "MAX_TIME"
 
-    print("\n=== SCIPY DIAGNOSTIC ===")
-    print(f"Label:       {label}")
-    print(f"t_event:     {te:.17e}")
-    print(f"n_steps:     {sol.nfev // 7}")
-    print(f"min_r_earth: {min_r1:.17e}")
-    print(f"min_r_moon:  {min_r2:.17e}")
-    print(f"max_r:       {max_rc:.17e}")
-    print(f"Jacobi init: {jacobi_init:.17e}")
-    print(f"Jacobi final:{jacobi_final:.17e}")
-    print(f"Jacobi error:{abs(jacobi_final - jacobi_init):.3e}")
-    print("========================\n")
+print(f"\n=== SCIPY DIAGNOSTIC ===")
+print(f"Label:       {label}")
+print(f"t_event:     {te:.17e}")
+print(f"n_steps:     {sol.nfev // 7}")
+print(f"n_accepted:  {len(sol.t)}")
 
-diagnose_scipy(0.065217, -2.177258, 3.05, 5000.0)
+print(f"\n--- SCIPY TRAJECTORY SAMPLES ---")
+print(f"{'t':>8}  {'x':>24}  {'y':>24}  {'vx':>24}  {'vy':>24}  {'C':>24}")
+for t_check in [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 300.0]:
+    if t_check <= te:
+        s = sol.sol(t_check)
+        c_now = jacobi_constant(s)
+        print(
+            f"{t_check:8.3f}  "
+            f"{s[0]:+.15e}  {s[1]:+.15e}  "
+            f"{s[2]:+.15e}  {s[3]:+.15e}  "
+            f"{c_now:.15e}"
+        )
+print("========================\n")
