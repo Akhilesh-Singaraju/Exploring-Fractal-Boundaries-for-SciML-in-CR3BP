@@ -346,7 +346,7 @@ fn read_basin_csv(path: &str) -> std::io::Result<Vec<CsvRow>> {
         if i == 0 { continue; }
         
         let p: Vec<&str> = line.split(',').collect();
-        if p.len() != 13 {
+        if p.len() != 13 { // <--- UPDATED FROM 10 TO 13
             continue;
         }
         rows.push(CsvRow {
@@ -563,7 +563,29 @@ pub fn run_batch_generation(t_val: f64) {
     }
 }
 
+pub fn diagnose_single(x0: f64, vx0: f64, c: f64, t_max: f64) {
+    println!("\n=== SINGLE TRAJECTORY DIAGNOSTIC ===");
+    println!("x0={:.10}, vx0={:.10}, C={}, t_max={}", x0, vx0, c, t_max);
+
+    let start = std::time::Instant::now();
+    let sol = solve_single(x0, vx0, c, t_max);
+    let elapsed = start.elapsed();
+
+    println!("Label:       {} ({})", OUTCOMES[sol.label as usize], sol.label);
+    println!("t_event:     {:.17e}", sol.t_event);
+    println!("n_steps:     {}", sol.n_steps);
+    println!("min_r_earth: {:.17e}", sol.min_r1);
+    println!("min_r_moon:  {:.17e}", sol.min_r2);
+    println!("max_r:       {:.17e}", sol.max_rc);
+    println!("Jacobi init: {:.17e}", sol.jacobi_initial);
+    println!("Jacobi final:{:.17e}", sol.jacobi_final);
+    println!("Jacobi error:{:.3e}", sol.jacobi_error);
+    println!("Wall time:   {:?}", elapsed);
+    println!("====================================\n");
+}
+
 fn main() {
     // pre_test_convergence(3.00, &[500.0, 1000.0, 5000.0, 10000.0, 12000.0], 1000);
-    run_batch_generation(5000.0);
+    // run_batch_generation(5000.0);
+    diagnose_single(0.065217, -2.177258, 3.05, 5000.0);
 }
