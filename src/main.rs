@@ -2,6 +2,7 @@ use ivp::prelude::*;
 use rayon::prelude::*;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 const MU: f64 = 0.0121505856;
 const R_EARTH: f64 = 6378.1363 / 384400.0;
@@ -276,6 +277,7 @@ fn generate_basin_grid(
     res_vx: usize,
     x_bounds: (f64, f64),
     vx_bounds: (f64, f64),
+    pb: &ProgressBar,
 ) -> Vec<GridRow> {
     let xs = linspace(x_bounds.0, x_bounds.1, res_x);
     let vxs = linspace(vx_bounds.0, vx_bounds.1, res_vx);
@@ -288,6 +290,9 @@ fn generate_basin_grid(
             let j = idx % res_x;
             let (x0, vx0) = (xs[j], vxs[i]);
             let s = solve_single(x0, vx0, c, t_max);
+
+            pb.inc(1);
+
             GridRow {
                 x0,
                 vx0,
@@ -346,7 +351,7 @@ fn read_basin_csv(path: &str) -> std::io::Result<Vec<CsvRow>> {
         if i == 0 { continue; }
         
         let p: Vec<&str> = line.split(',').collect();
-        if p.len() != 13 { // <--- UPDATED FROM 10 TO 13
+        if p.len() != 13 {
             continue;
         }
         rows.push(CsvRow {
@@ -521,46 +526,122 @@ pub fn analyze_convergence(filepath: &str, max_samples: usize) {
     }
 }
 
-pub fn pre_test_convergence(c: f64, t_max_list: &[f64], n_samples: usize) {
-    println!("\nRunning Pre-Test for C={}", c);
+pub fn find_optimal_t_max(
+    c_values: &[f64],
+    absolute_max_t: f64,
+    n_samples: usize,
+    target_percentile: f64,
+) {
+    println!(
+        "\nt_max Across {} C Values (Target: {:.1}%)",
+        c_values.len(),
+        target_percentile * 100.0
+    );
+    println!("Absolute max integration time: {:.1}", absolute_max_t);
+    println!("Samples per C: {}", n_samples);
+
     let mut rng = Lcg::new(42);
     let x0: Vec<f64> = (0..n_samples).map(|_| rng.uniform(-1.5, 1.5)).collect();
     let vx0: Vec<f64> = (0..n_samples).map(|_| rng.uniform(-3.0, 3.0)).collect();
 
-    for &t in t_max_list {
-        let sols = solve_batch(&x0, &vx0, c, t);
-        let mut counts = [0usize; 5];
-        for s in &sols {
-            counts[s.label as usize] += 1;
-        }
-        let parts: Vec<String> = OUTCOMES
+    struct CResult {
+        c: f64,
+        valid_count: usize,
+        unresolved_count: usize,
+        optimal_t: f64,
+    }
+
+    let mut results: Vec<CResult> = Vec::with_capacity(c_values.len());
+
+    for &c in c_values {
+        print!("  C={:.4} ... ", c);
+
+        let sols = solve_batch(&x0, &vx0, c, absolute_max_t);
+
+        let mut t_events: Vec<f64> = sols
             .iter()
-            .zip(counts.iter())
-            .map(|(k, v)| format!("{}: {:>3}", k, v))
+            .filter(|s| s.label == 1 || s.label == 2 || s.label == 3)
+            .map(|s| s.t_event)
             .collect();
-        println!("t_max = {:<6} | {}", format!("{:?}", t), parts.join(" | "));
+
+        let valid_count = t_events.len();
+        let unresolved_count = sols.iter().filter(|s| s.label == 4).count();
+
+        let optimal_t = if t_events.is_empty() {
+            f64::INFINITY
+        } else {
+            t_events.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p_idx = ((valid_count as f64) * target_percentile) as usize;
+            let p_idx = p_idx.clamp(0, valid_count.saturating_sub(1));
+            t_events[p_idx]
+        };
+
+        println!(
+            "valid={:>5}, unresolved={:>5}, t_{:.0}%={:>10.2}",
+            valid_count,
+            unresolved_count,
+            target_percentile * 100.0,
+            optimal_t
+        );
+
+        results.push(CResult {
+            c,
+            valid_count,
+            unresolved_count,
+            optimal_t,
+        });
     }
 }
 
 pub fn run_batch_generation(t_val: f64) {
     let c_values = [3.00, 3.05, 3.10, 3.14, 3.20];
-    let grid_resolution = 300;
+    // let grid_resolution = 300;
+    let grid_resolutions = [300, 500, 700, 900];
+
+    let multi = MultiProgress::new();
+
+    let total_tasks = (c_values.len() * grid_resolutions.len()) as u64;
+    let main_pb = multi.add(ProgressBar::new(total_tasks));
+    main_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[Batch] [{bar:40.cyan/blue}] {pos}/{len} grids")
+            .unwrap(),
+    );
 
     fs::create_dir_all("files/data").unwrap();
 
-    for &c in &c_values {
-        let df = generate_basin_grid(
-            c,
-            t_val,
-            grid_resolution,
-            grid_resolution,
-            (-1.5, 1.5),
-            (-3.0, 3.0),
-        );
-        let output_path = format!("files/data/basin_C{:.2}.csv", c);
-        write_basin_csv(&output_path, &df).unwrap();
-        println!("Saved: {}", output_path);
+    for &res in &grid_resolutions{
+        for &c in &c_values {
+            let total_cells = (res * res) as u64;
+            let grid_pb = multi.add(ProgressBar::new(total_cells));
+            grid_pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  ↳ {msg} [{bar:30.green/white}] {percent}% ETA: {eta}")
+                    .unwrap()
+                    .progress_chars("=>-"),
+            );
+            
+            grid_pb.set_message(format!("C={:.2} {}x{}", c, res, res));
+
+            let df = generate_basin_grid(
+                c,
+                t_val,
+                res,
+                res,
+                (-1.5, 1.5),
+                (-3.0, 3.0),
+                &grid_pb,
+            );
+            let output_path = format!("files/data/C{:.2}/{}x{}.csv", c, res, res);
+            fs::create_dir_all(format!("files/data/C{:.2}", c)).unwrap();
+            write_basin_csv(&output_path, &df).unwrap();
+            println!("Saved: {}", output_path);
+
+            grid_pb.finish_and_clear();
+            main_pb.inc(1);
+        }
     }
+    main_pb.finish_with_message("All grids completed!");
 }
 fn jacobi_constant(x: f64, y: f64, vx: f64, vy: f64) -> f64 {
     let dx1 = x + MU;
@@ -646,8 +727,50 @@ pub fn diagnose_single(x0: f64, vx0: f64, c: f64, t_max: f64) {
     println!("====================================\n");
 }
 
+pub fn run_batch_generation_subset(t_val: f64, c_values: &[f64], grid_resolutions: &[usize]) {
+    let multi = MultiProgress::new();
+    let total_tasks = (c_values.len() * grid_resolutions.len()) as u64;
+    let main_pb = multi.add(ProgressBar::new(total_tasks));
+    main_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[Batch] [{bar:40.cyan/blue}] {pos}/{len} grids")
+            .unwrap(),
+    );
+    fs::create_dir_all("files/data").unwrap();
+
+    for &res in grid_resolutions {
+        for &c in c_values {
+            let total_cells = (res * res) as u64;
+            let grid_pb = multi.add(ProgressBar::new(total_cells));
+            grid_pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  ↳ {msg} [{bar:30.green/white}] {percent}% ETA: {eta}")
+                    .unwrap()
+                    .progress_chars("=>-"),
+            );
+            grid_pb.set_message(format!("C={:.2} {}x{}", c, res, res));
+
+            let df = generate_basin_grid(c, t_val, res, res, (-1.5, 1.5), (-3.0, 3.0), &grid_pb);
+            let output_path = format!("files/data/C{:.2}/{}x{}.csv", c, res, res);
+            fs::create_dir_all(format!("files/data/C{:.2}", c)).unwrap();
+            write_basin_csv(&output_path, &df).unwrap();
+            println!("Saved: {}", output_path);
+
+            grid_pb.finish_and_clear();
+            main_pb.inc(1);
+        }
+    }
+    main_pb.finish_with_message("Subset completed!");
+}
+
 fn main() {
-    // pre_test_convergence(3.00, &[500.0, 1000.0, 5000.0, 10000.0, 12000.0], 1000);
-    // run_batch_generation(5000.0);
-    diagnose_single(0.065217, -2.177258, 3.05, 5000.0);
+    // let c_values = [3.00, 3.05, 3.10, 3.14, 3.20];
+    // find_optimal_t_max(&c_values, 25000.0, 1000, 0.99);
+    let t_optim = 8100.0;
+    // run_batch_generation(t_optim);
+
+    run_batch_generation_subset(t_optim, &[3.05, 3.20], &[500]);
+    analyze_convergence("files/data/C3.05/500x500.csv", 200);
+    analyze_convergence("files/data/C3.20/500x500.csv", 200);
+    // diagnose_single(0.065217, -2.177258, 3.05, 5000.0);
 }

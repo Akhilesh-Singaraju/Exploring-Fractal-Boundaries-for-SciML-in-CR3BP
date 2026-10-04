@@ -27,7 +27,7 @@ else:
 print(f"Using device: {device}")
 
 num_ensembles = 5
-C_VALUES = [3.00, 3.05, 3.10, 3.14]
+C_VALUES = [3.00, 3.05, 3.10, 3.14, 3.20]
 
 EPOCHS = 150
 BATCH_SIZE = 512
