@@ -1,9 +1,12 @@
+use differential_equations::derive::State;
+use differential_equations::ivp::IVP;
+use differential_equations::methods::ExplicitRungeKutta;
+use differential_equations::ode::ODE;
+use differential_equations::solout::{CrossingDirection, Event, EventConfig};
+use differential_equations::status::Status;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use ivp::dense::StepInterpolant;
-use ivp::methods::DOP853;
-use ivp::prelude::*;
-use ivp::solout::{ControlFlag, SolOut};
 use rayon::prelude::*;
+use std::cell::RefCell;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 
@@ -23,37 +26,116 @@ const OUTCOMES: [&str; 5] = [
 const RTOL: f64 = 1e-11;
 const ATOL: f64 = 1e-13;
 const MAX_STEP: f64 = 0.01;
-const N_EVENTS: usize = 3;
+
+const EVENT_TOL: f64 = 1e-8;
+
+#[derive(State)]
+pub struct StateVector<T> {
+    pub x: T,
+    pub y: T,
+    pub z: T,
+    pub vx: T,
+    pub vy: T,
+    pub vz: T,
+}
 
 struct Cr3bpSystem;
 
-impl FirstOrderSystem for Cr3bpSystem {
-    fn derivative(&self, _t: f64, y: &[f64], dydx: &mut [f64]) {
-        let (x, yy, vx, vy) = (y[0], y[1], y[2], y[3]);
+const ONE_MINUS_MU: f64 = 1.0 - MU;
 
-        let dx1 = x + MU;
-        let dx2 = x - 1.0 + MU;
+impl ODE<f64, StateVector<f64>> for Cr3bpSystem {
+    #[inline(always)]
+    #[inline(always)]
+    fn diff(&self, _t: f64, sv: &StateVector<f64>, dsdt: &mut StateVector<f64>) {
+        let dx1 = sv.x + MU;
+        let dx2 = sv.x - ONE_MINUS_MU;
+        let y2 = sv.y * sv.y;
 
-        let r1_sq = dx1 * dx1 + yy * yy;
-        let r2_sq = dx2 * dx2 + yy * yy;
+        let r1_sq = dx1 * dx1 + y2;
+        let r2_sq = dx2 * dx2 + y2;
 
-        let r1_3 = r1_sq * r1_sq.sqrt();
-        let r2_3 = r2_sq * r2_sq.sqrt();
+        let r1_3_inv = 1.0 / (r1_sq * r1_sq.sqrt());
+        let r2_3_inv = 1.0 / (r2_sq * r2_sq.sqrt());
 
-        let domega_dx = x - (1.0 - MU) * dx1 / r1_3 - MU * dx2 / r2_3;
+        dsdt.x = sv.vx;
+        dsdt.y = sv.vy;
+        dsdt.z = 0.0;
+        dsdt.vx = sv.x - ONE_MINUS_MU * dx1 * r1_3_inv - MU * dx2 * r1_3_inv + 2.0 * sv.vy;
+        dsdt.vy = sv.y * (1.0 - ONE_MINUS_MU * r1_3_inv - MU * r2_3_inv) - 2.0 * sv.vx;
+        dsdt.vz = 0.0;
+    }
+}
 
-        let domega_dy = yy - (1.0 - MU) * yy / r1_3 - MU * yy / r2_3;
+#[derive(Debug, Default)]
+struct Tracker {
+    min_r1: f64,
+    min_r2: f64,
+    max_rc: f64,
+}
 
-        dydx[0] = vx;
-        dydx[1] = vy;
-        dydx[2] = domega_dx + 2.0 * vy;
-        dydx[3] = domega_dy - 2.0 * vx;
+impl Tracker {
+    #[inline]
+    fn from_radii(r1: f64, r2: f64, rc: f64) -> Self {
+        Self {
+            min_r1: r1,
+            min_r2: r2,
+            max_rc: rc,
+        }
+    }
+
+    #[inline]
+    fn update_from_radii(&mut self, r1: f64, r2: f64, rc: f64) {
+        if r1 < self.min_r1 {
+            self.min_r1 = r1;
+        }
+        if r2 < self.min_r2 {
+            self.min_r2 = r2;
+        }
+        if rc > self.max_rc {
+            self.max_rc = rc;
+        }
+    }
+}
+
+struct Cr3bpEvent {
+    tracker: RefCell<Tracker>,
+}
+
+impl Cr3bpEvent {
+    fn from_radii(r1: f64, r2: f64, rc: f64) -> Self {
+        Self {
+            tracker: RefCell::new(Tracker::from_radii(r1, r2, rc)),
+        }
+    }
+}
+
+impl Event<f64, StateVector<f64>> for Cr3bpEvent {
+    fn config(&self) -> EventConfig {
+        EventConfig::new(CrossingDirection::Negative, Some(1))
+    }
+
+    fn event(&self, _t: f64, y: &StateVector<f64>) -> f64 {
+        let (r1, r2, rc) = radii(y.x, y.y);
+        self.tracker.borrow_mut().update_from_radii(r1, r2, rc);
+        (r1 - R_EARTH).min(r2 - R_MOON).min(R_ESCAPE - rc)
     }
 }
 
 #[inline]
-fn classify(y: &[f64]) -> u8 {
-    let (r1, r2, rc) = radii(y[0], y[1]);
+fn radii(x: f64, y: f64) -> (f64, f64, f64) {
+    let dx1 = x + MU;
+    let dx2 = x - 1.0 + MU;
+
+    let r1 = (dx1 * dx1 + y * y).sqrt();
+    let r2 = (dx2 * dx2 + y * y).sqrt();
+    let rc = (x * x + y * y).sqrt();
+
+    (r1, r2, rc)
+}
+
+#[inline]
+fn classify_initial(sv: &StateVector<f64>) -> u8 {
+    let (r1, r2, rc) = radii(sv.x, sv.y);
 
     if r1 <= R_EARTH {
         1
@@ -65,16 +147,32 @@ fn classify(y: &[f64]) -> u8 {
         4
     }
 }
+
 #[inline]
-fn radii(x: f64, y: f64) -> (f64, f64, f64) {
-    let dx1 = x + MU;
-    let dx2 = x - 1.0 + MU;
+fn classify_event_state(sv: &StateVector<f64>) -> u8 {
+    let (r1, r2, rc) = radii(sv.x, sv.y);
 
-    let r1 = (dx1 * dx1 + y * y).sqrt();
-    let r2 = (dx2 * dx2 + y * y).sqrt();
-    let rc = (x * x + y * y).sqrt();
+    if r1 <= R_EARTH + EVENT_TOL {
+        return 1;
+    }
+    if r2 <= R_MOON + EVENT_TOL {
+        return 2;
+    }
+    if rc >= R_ESCAPE - EVENT_TOL {
+        return 3;
+    }
 
-    (r1, r2, rc)
+    let d1 = (r1 - R_EARTH).abs();
+    let d2 = (r2 - R_MOON).abs();
+    let d3 = (rc - R_ESCAPE).abs();
+
+    if d1 <= d2 && d1 <= d3 {
+        1
+    } else if d2 <= d3 {
+        2
+    } else {
+        3
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -88,196 +186,6 @@ pub struct Solution {
     pub jacobi_initial: f64,
     pub jacobi_final: f64,
     pub jacobi_error: f64,
-}
-
-#[inline]
-fn event_values(y: &[f64]) -> [f64; 3] {
-    let (r1, r2, rc) = radii(y[0], y[1]);
-
-    [r1 - R_EARTH, r2 - R_MOON, rc - R_ESCAPE]
-}
-
-#[inline]
-fn event_value(index: usize, y: &[f64]) -> f64 {
-    let (x, yy) = (y[0], y[1]);
-
-    match index {
-        0 => {
-            let dx = x + MU;
-            (dx * dx + yy * yy).sqrt() - R_EARTH
-        }
-        1 => {
-            let dx = x - 1.0 + MU;
-            (dx * dx + yy * yy).sqrt() - R_MOON
-        }
-        2 => (x * x + yy * yy).sqrt() - R_ESCAPE,
-        _ => unreachable!("invalid event index"),
-    }
-}
-
-#[inline]
-fn event_crossed(index: usize, previous: f64, current: f64) -> bool {
-    match index {
-        0 | 1 => previous > 0.0 && current <= 0.0,
-
-        2 => previous < 0.0 && current >= 0.0,
-
-        _ => unreachable!("invalid event index"),
-    }
-}
-
-fn refine_event(
-    interpolant: &StepInterpolant<'_>,
-    mut lo: f64,
-    mut hi: f64,
-    mut flo: f64,
-    fhi: f64,
-    index: usize,
-) -> (f64, [f64; 4]) {
-    let mut ym = [0.0; 4];
-
-    if flo == 0.0 {
-        interpolant.interpolate(lo, &mut ym);
-        return (lo, ym);
-    }
-
-    if fhi == 0.0 {
-        interpolant.interpolate(hi, &mut ym);
-        return (hi, ym);
-    }
-
-    for _ in 0..60 {
-        let mid = 0.5 * (lo + hi);
-
-        interpolant.interpolate(mid, &mut ym);
-        let fm = event_value(index, &ym);
-
-        if fm == 0.0 || (hi - lo).abs() <= 2.0e-12 * mid.abs().max(1.0) {
-            return (mid, ym);
-        }
-
-        if flo.signum() == fm.signum() {
-            lo = mid;
-            flo = fm;
-        } else {
-            hi = mid;
-        }
-    }
-
-    let t = 0.5 * (lo + hi);
-    interpolant.interpolate(t, &mut ym);
-
-    (t, ym)
-}
-
-struct BatchSolout {
-    initialized: bool,
-    prev_g: [f64; N_EVENTS],
-
-    min_r1: f64,
-    min_r2: f64,
-    max_rc: f64,
-
-    last_t: f64,
-    last_y: [f64; 4],
-
-    event: Option<(u8, f64, [f64; 4])>,
-}
-
-impl BatchSolout {
-    fn new(y0: &[f64; 4]) -> Self {
-        let mut out = Self {
-            initialized: false,
-            prev_g: [0.0; 3],
-            min_r1: f64::INFINITY,
-            min_r2: f64::INFINITY,
-            max_rc: 0.0,
-            last_t: 0.0,
-            last_y: *y0,
-            event: None,
-        };
-
-        out.update(y0);
-        out
-    }
-
-    #[inline]
-    fn update(&mut self, y: &[f64]) {
-        let (r1, r2, rc) = radii(y[0], y[1]);
-
-        self.min_r1 = self.min_r1.min(r1);
-        self.min_r2 = self.min_r2.min(r2);
-        self.max_rc = self.max_rc.max(rc);
-    }
-}
-
-impl SolOut for BatchSolout {
-    fn solout(
-        &mut self,
-        xold: f64,
-        x: &mut f64,
-        y: &mut [f64],
-        interpolant: Option<&StepInterpolant<'_>>,
-    ) -> ControlFlag {
-        let curr_g = event_values(y);
-
-        if !self.initialized {
-            self.prev_g = curr_g;
-            self.initialized = true;
-
-            self.last_t = *x;
-            self.last_y.copy_from_slice(y);
-
-            return ControlFlag::Continue;
-        }
-
-        let mut earliest: Option<(usize, f64, [f64; 4])> = None;
-
-        for index in 0..N_EVENTS {
-            if !event_crossed(index, self.prev_g[index], curr_g[index]) {
-                continue;
-            }
-
-            let (te, ye) = match interpolant {
-                Some(ip) => refine_event(ip, xold, *x, self.prev_g[index], curr_g[index], index),
-
-                None => {
-                    let mut ys = [0.0; 4];
-                    ys.copy_from_slice(y);
-                    (*x, ys)
-                }
-            };
-
-            let replace = match earliest {
-                Some((_, previous_te, _)) => te < previous_te,
-                None => true,
-            };
-
-            if replace {
-                earliest = Some((index, te, ye));
-            }
-        }
-
-        if let Some((index, te, ye)) = earliest {
-            self.update(&ye);
-
-            self.last_t = te;
-            self.last_y = ye;
-
-            self.event = Some(((index + 1) as u8, te, ye));
-
-            return ControlFlag::Interrupt;
-        }
-
-        self.prev_g = curr_g;
-
-        self.last_t = *x;
-        self.last_y.copy_from_slice(y);
-
-        self.update(y);
-
-        ControlFlag::Continue
-    }
 }
 
 pub fn solve_batch(xs: &[f64], vxs: &[f64], c: f64, t_max: f64) -> Vec<Solution> {
@@ -333,15 +241,7 @@ fn generate_basin_grid(
             let x0 = xs[j];
             let vx0 = vxs[i];
 
-            let s = solve_single(
-                x0,
-                vx0,
-                c,
-                t_max,
-                MAX_STEP,
-                RTOL,
-                ATOL,
-            );
+            let s = solve_single(x0, vx0, c, t_max, MAX_STEP, RTOL, ATOL);
 
             pb.inc(1);
 
@@ -369,6 +269,7 @@ fn write_basin_csv(path: &str, rows: &[GridRow]) -> std::io::Result<()> {
         buf,
         "x0,vx0,C,label_id,outcome,t_event,n_steps,min_r_earth,min_r_moon,max_r,jacobi_initial,jacobi_final,jacobi_error"
     )?;
+
     for r in rows {
         writeln!(
             buf,
@@ -388,6 +289,7 @@ fn write_basin_csv(path: &str, rows: &[GridRow]) -> std::io::Result<()> {
             r.jacobi_error
         )?;
     }
+
     fs::write(path, buf)
 }
 
@@ -430,10 +332,12 @@ fn read_basin_csv(path: &str) -> std::io::Result<Vec<GridRow>> {
 }
 
 struct Lcg(u64);
+
 impl Lcg {
     fn new(seed: u64) -> Self {
         Lcg(seed)
     }
+
     fn next_u32(&mut self) -> u32 {
         self.0 = self
             .0
@@ -441,6 +345,7 @@ impl Lcg {
             .wrapping_add(1442695040888963407);
         (self.0 >> 32) as u32
     }
+
     fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * (self.next_u32() as f64) / ((u32::MAX as f64) + 1.0)
     }
@@ -451,10 +356,12 @@ fn quantile(sorted: &[f64], q: f64) -> f64 {
     if n == 1 {
         return sorted[0];
     }
+
     let pos = q.clamp(0.0, 1.0) * (n - 1) as f64;
     let lo = (pos.floor() as usize).min(n - 1);
     let hi = (pos.ceil() as usize).min(n - 1);
     let frac = pos - lo as f64;
+
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
 }
 
@@ -462,6 +369,7 @@ fn sample_std(v: &[f64], mean: f64) -> f64 {
     if v.len() < 2 {
         return f64::NAN;
     }
+
     let ss: f64 = v.iter().map(|x| (x - mean) * (x - mean)).sum();
     (ss / (v.len() - 1) as f64).sqrt()
 }
@@ -478,6 +386,7 @@ pub fn analyze_convergence(filepath: &str, max_samples: usize) {
 
     let mut rng = Lcg::new(42);
     let mut idx: Vec<usize> = (0..unresolved.len()).collect();
+
     for i in 0..n {
         let j = i + (rng.next_u32() as usize) % (unresolved.len() - i);
         idx.swap(i, j);
@@ -520,6 +429,7 @@ pub fn analyze_convergence(filepath: &str, max_samples: usize) {
 
     let sols = sols_12000.expect("12000.0 convergence result was not computed");
     let mut long_lived: Vec<GridRow> = Vec::new();
+
     for (i, s) in sols.iter().enumerate() {
         if s.label == 4 {
             long_lived.push(GridRow {
@@ -548,6 +458,7 @@ pub fn analyze_convergence(filepath: &str, max_samples: usize) {
         "{:>12} {:>12} {:>15} {:>12} {:>9} {:>12} {:>12} {:>12}",
         "x0", "vx0", "outcome", "t_event", "n_steps", "min_r_earth", "min_r_moon", "max_r"
     );
+
     for r in &long_lived {
         println!(
             "{:>12.6} {:>12.6} {:>15} {:>12.4} {:>9} {:>12.6} {:>12.6} {:>12.6}",
@@ -565,10 +476,13 @@ pub fn analyze_convergence(filepath: &str, max_samples: usize) {
 
     let stat_labels = ["count", "mean", "std", "min", "25%", "50%", "75%", "max"];
     let mut col_stats: Vec<[f64; 8]> = Vec::with_capacity(4);
+
     for v in &col_data {
         let mut sorted = v.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
         let mean = v.iter().sum::<f64>() / v.len() as f64;
+
         col_stats.push([
             v.len() as f64,
             mean,
@@ -585,6 +499,7 @@ pub fn analyze_convergence(filepath: &str, max_samples: usize) {
         "\n{:>8} {:>14} {:>14} {:>14} {:>14}",
         "", col_names[0], col_names[1], col_names[2], col_names[3]
     );
+
     for (si, slabel) in stat_labels.iter().enumerate() {
         println!(
             "{:>8} {:>14.6} {:>14.6} {:>14.6} {:>14.6}",
@@ -608,6 +523,7 @@ pub fn find_optimal_t_max(
     println!("Samples per C: {}", n_samples);
 
     let mut rng = Lcg::new(42);
+
     let x0: Vec<f64> = (0..n_samples).map(|_| rng.uniform(-1.5, 1.5)).collect();
     let vx0: Vec<f64> = (0..n_samples).map(|_| rng.uniform(-3.0, 3.0)).collect();
 
@@ -644,11 +560,7 @@ pub fn find_optimal_t_max(
     }
 }
 
-pub fn run_batch_generation(
-    t_val: f64,
-    c_values: &[f64],
-    grid_resolutions: &[usize],
-) {
+pub fn run_batch_generation(t_val: f64, c_values: &[f64], grid_resolutions: &[usize]) {
     let multi = MultiProgress::new();
 
     let total_rows: u64 = c_values
@@ -665,11 +577,9 @@ pub fn run_batch_generation(
 
     main_pb.set_style(
         ProgressStyle::default_bar()
-            .template(
-                "[Batch] [{bar:40.cyan/blue}] \
-                 {pos}/{len} rows ({percent}%) {msg}"
-            )
-            .unwrap(),
+            .template("[Batch] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) | ETA: {eta_precise} | {msg}")
+            .unwrap()
+            .progress_chars("█▉▊▋▌▍▎▏ "),
     );
 
     fs::create_dir_all("files/data").unwrap();
@@ -678,15 +588,7 @@ pub fn run_batch_generation(
         for &c in c_values {
             main_pb.set_message(format!("C={:.2} {}x{}", c, res, res));
 
-            let df = generate_basin_grid(
-                c,
-                t_val,
-                res,
-                res,
-                (-1.5, 1.5),
-                (-3.0, 3.0),
-                &main_pb,
-            );
+            let df = generate_basin_grid(c, t_val, res, res, (-1.5, 1.5), (-3.0, 3.0), &main_pb);
 
             let dir = format!("files/data/C{:.2}", c);
             fs::create_dir_all(&dir).unwrap();
@@ -765,108 +667,6 @@ pub fn validate_max_step(x0: f64, vx0: f64, c: f64, t_max: f64, candidate_steps:
     }
 }
 
-fn solve_single(
-    x0: f64,
-    vx0: f64,
-    jacobi_c: f64,
-    t_max: f64,
-    max_step: f64,
-    rtol: f64,
-    atol: f64,
-) -> Solution {
-    let (r1_0, r2_0, rc_0) = radii(x0, 0.0);
-
-    let omega0 = 0.5 * x0 * x0 + (1.0 - MU) / r1_0 + MU / r2_0;
-
-    let vy2 = 2.0 * omega0 - jacobi_c - vx0 * vx0;
-
-    if vy2 < 0.0 {
-        return Solution {
-            label: 0,
-            t_event: 0.0,
-            n_steps: 0,
-            min_r1: r1_0,
-            min_r2: r2_0,
-            max_rc: rc_0,
-            jacobi_initial: jacobi_c,
-            jacobi_final: jacobi_c,
-            jacobi_error: 0.0,
-        };
-    }
-
-    let vy0 = vy2.sqrt();
-    let y0 = [x0, 0.0, vx0, vy0];
-
-    if r1_0 <= R_EARTH || r2_0 <= R_MOON || rc_0 >= R_ESCAPE {
-        let label = classify(&y0);
-
-        return Solution {
-            label,
-            t_event: 0.0,
-            n_steps: 0,
-            min_r1: r1_0,
-            min_r2: r2_0,
-            max_rc: rc_0,
-            jacobi_initial: jacobi_c,
-            jacobi_final: jacobi_c,
-            jacobi_error: 0.0,
-        };
-    }
-
-    let max_steps = (((t_max / max_step).ceil() as usize) * 2).clamp(10_000, 50_000_000);
-
-    let system = Cr3bpSystem;
-
-    let solver = DOP853 {
-        max_step: Some(max_step),
-        max_steps,
-        dense_output: true,
-        ..DOP853::default()
-    };
-
-    let mut out = BatchSolout::new(&y0);
-
-    let result = solver
-        .solve(
-            &system,
-            0.0,
-            &y0,
-            t_max,
-            rtol.into(),
-            atol.into(),
-            Some(&mut out),
-        )
-        .expect("DOP853 integration failed");
-
-    let (label, t_event, final_state) = match out.event {
-        Some((label, te, ys)) => (label, te, ys),
-
-        None => (4, out.last_t, out.last_y),
-    };
-
-    let jacobi_final = jacobi_constant(
-        final_state[0],
-        final_state[1],
-        final_state[2],
-        final_state[3],
-    );
-
-    Solution {
-        label,
-        t_event,
-        n_steps: result.steps.accepted as u64,
-
-        min_r1: out.min_r1,
-        min_r2: out.min_r2,
-        max_rc: out.max_rc,
-
-        jacobi_initial: jacobi_c,
-        jacobi_final,
-
-        jacobi_error: (jacobi_final - jacobi_c).abs(),
-    }
-}
-
 pub fn validate_tolerances(x0: f64, vx0: f64, c: f64, t_max: f64) {
     println!("\n=== TOLERANCE VALIDATION (MAX_STEP=0.01) ===");
     println!("x0={:.10}, vx0={:.10}, C={}", x0, vx0, c);
@@ -895,37 +695,146 @@ pub fn validate_tolerances(x0: f64, vx0: f64, c: f64, t_max: f64) {
     );
 }
 
+fn solve_single(
+    x0: f64,
+    vx0: f64,
+    jacobi_c: f64,
+    t_max: f64,
+    max_step: f64,
+    rtol: f64,
+    atol: f64,
+) -> Solution {
+    let (r1_0, r2_0, rc_0) = radii(x0, 0.0);
+
+    let omega0 = 0.5 * x0 * x0 + (1.0 - MU) / r1_0 + MU / r2_0;
+    let vy2 = 2.0 * omega0 - jacobi_c - vx0 * vx0;
+
+    if vy2 < 0.0 {
+        return Solution {
+            label: 0,
+            t_event: 0.0,
+            n_steps: 0,
+            min_r1: r1_0,
+            min_r2: r2_0,
+            max_rc: rc_0,
+            jacobi_initial: jacobi_c,
+            jacobi_final: jacobi_c,
+            jacobi_error: 0.0,
+        };
+    }
+
+    let vy0 = vy2.sqrt();
+
+    let y0 = StateVector {
+        x: x0,
+        y: 0.0,
+        z: 0.0,
+        vx: vx0,
+        vy: vy0,
+        vz: 0.0,
+    };
+
+    if r1_0 <= R_EARTH || r2_0 <= R_MOON || rc_0 >= R_ESCAPE {
+        let label = classify_initial(&y0);
+
+        return Solution {
+            label,
+            t_event: 0.0,
+            n_steps: 0,
+            min_r1: r1_0,
+            min_r2: r2_0,
+            max_rc: rc_0,
+            jacobi_initial: jacobi_c,
+            jacobi_final: jacobi_c,
+            jacobi_error: 0.0,
+        };
+    }
+
+    let y_fallback = StateVector {
+        x: x0,
+        y: 0.0,
+        z: 0.0,
+        vx: vx0,
+        vy: vy0,
+        vz: 0.0,
+    };
+
+    let max_steps =
+        (((t_max / max_step).ceil() as u64).saturating_mul(2) + 1_000).min(4_000_000_000) as usize;
+
+    let system = Cr3bpSystem;
+    let event = Cr3bpEvent::from_radii(r1_0, r2_0, rc_0);
+
+    let result = IVP::ode(&system, 0.0, t_max, y0)
+        .t_eval(std::slice::from_ref(&t_max))
+        .event(&event)
+        .method(
+            ExplicitRungeKutta::dop853()
+                .h_max(max_step)
+                .max_steps(max_steps)
+                .rtol(rtol)
+                .atol(atol),
+        )
+        .solve();
+
+    match result {
+        Ok(sol) => {
+            let is_complete = matches!(sol.status, Status::Complete);
+
+            let final_state = sol.y.last().unwrap_or(&y_fallback);
+
+            let label = if is_complete {
+                4
+            } else {
+                classify_event_state(final_state)
+            };
+
+            let t_event = if is_complete {
+                t_max
+            } else {
+                sol.t.last().copied().unwrap_or(t_max)
+            };
+
+            let jacobi_final =
+                jacobi_constant(final_state.x, final_state.y, final_state.vx, final_state.vy);
+
+            let tracker = event.tracker.borrow();
+
+            Solution {
+                label,
+                t_event,
+                n_steps: sol.steps.accepted as u64,
+                min_r1: tracker.min_r1,
+                min_r2: tracker.min_r2,
+                max_rc: tracker.max_rc,
+                jacobi_initial: jacobi_c,
+                jacobi_final,
+                jacobi_error: (jacobi_final - jacobi_c).abs(),
+            }
+        }
+        Err(e) => panic!("DOP853 integration failed: {:?}", e),
+    }
+}
+
 fn main() {
-    println!("Rayon threads: {}", rayon::current_num_threads());
-    // Finding Best t
-    // let c_values = [3.00, 3.05, 3.10, 3.14, 3.20];
-    // find_optimal_t_max(&c_values, 25000.0, 1000, 0.99);
     const T_OPTIM: f64 = 8100.0;
 
-    // // Finding highest max_step
-    // let test_cases = [
-    //     (0.065217, -2.177258, 3.05),
-    //     (0.5, -1.0, 3.14),
-    //     (-0.8, 0.5, 3.00),
-    //     (1.2, -2.5, 3.20),
-    // ];
+    let x0 = -0.5;
+    let vx0 = 0.0;
+    let c = 3.05;
 
-    // // let candidate_steps = [0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
+    validate_tolerances(x0, vx0, c, T_OPTIM);
 
-    // // for &(x0, vx0, c) in &test_cases {
-    // //     validate_max_step(x0, vx0, c, 8100.0, &candidate_steps);
-    // // }
+    validate_max_step(
+        x0,
+        vx0,
+        c,
+        T_OPTIM,
+        &[1e-4, 1e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1, 5e-1, 1.0],
+    );
 
-    // // Finding ATOL and RTOl values
-    // for &(x0, vx0, c) in &test_cases {
-    //     validate_tolerances(x0, vx0, c, 8100.0);
-    // }
-
-    // Running Test Batch
-    run_batch_generation(T_OPTIM, &[3.05, 3.20], &[500]);
-    analyze_convergence("files/data/C3.05/500x500.csv", 200);
-    analyze_convergence("files/data/C3.20/500x500.csv", 200);
-
-    // Final Run
-    // run_batch_generation(t_optim);
+    // Test Batch
+    // run_batch_generation(T_OPTIM, &[3.05, 3.20], &[500]);
+    // analyze_convergence("files/data/C3.05/500x500.csv", 200);
+    // analyze_convergence("files/data/C3.20/500x500.csv", 200);
 }
