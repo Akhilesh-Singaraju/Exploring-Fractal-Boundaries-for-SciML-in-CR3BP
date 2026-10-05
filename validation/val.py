@@ -58,11 +58,11 @@ def scipy_classify(x0, vx0, C, t_max, method="RK45"):
         (0.0, t_max),
         y0,
         method="DOP853",
-        rtol=1e-11,
-        atol=1e-13,
+        rtol=1e-09,
+        atol=1e-11,
         events=make_events(),
         dense_output=True,
-        max_step=0.01,
+        max_step=0.1,
     )
 
     fired = [i for i in range(3) if sol.t_events[i].size > 0]
@@ -122,7 +122,7 @@ def scipy_classify(x0, vx0, C, t_max, method="RK45"):
 #     print(f"x0={m[0]:.5f} vx0={m[1]:.5f}  {m[2]} vs {m[3]}  margin={m[4]:.2e}")
 
 print("\nCompare with Rust CSV output")
-df = pd.read_csv("files/data/basin_C3.05.csv")
+df = pd.read_csv("files/data/3.00/100x100.csv")
 sample = df.sample(50, random_state=42)
 
 mismatch_label, worst_dt, worst_dr = 0, 0.0, 0.0

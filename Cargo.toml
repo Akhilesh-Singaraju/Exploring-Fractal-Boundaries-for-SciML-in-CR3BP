@@ -11,10 +11,6 @@ include = [
 [dependencies]
 rayon = "1.10"
 ivp = "0.6"
-indicatif = "0.18.6"
-differential-equations = "0.6.1"
-cmake = "0.1"
-bindgen = "0.72"
 
 [profile.release]
 opt-level = 3
