@@ -9,7 +9,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from unc_map import BasinClassifier, load_ensemble, DEVICE
+from CR3BP_Neural_Fractals.postprocessing.unc_map import BasinClassifier, load_ensemble, DEVICE
 
 DATA_DIR = "files/data"
 PLOT_DIR = "files/figures"

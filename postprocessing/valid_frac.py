@@ -7,7 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 try:
-    from beta import compute_direct_betas, ALPHA
+    from CR3BP_Neural_Fractals.postprocessing.beta import compute_direct_betas, ALPHA
 except ImportError:
     try:
         from beta_analysis import compute_neural_betas as compute_direct_betas, ALPHA
