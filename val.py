@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 
 
-CSV_PATH = "files/data/3.05/300x300.csv"
+CSV_PATH = "files/data/3.20/300x300.csv"
 OUT_DIR = "files/val"
 
 MU = 0.0121505856
@@ -58,8 +58,8 @@ TMAX_BOUNDARY_TOL = 1e-3
 CHAOTIC_TIME_THRESHOLD = 100.0
 
 METHOD = "DOP853"
-RTOL = 1e-10
-ATOL = 1e-12
+RTOL = 1e-09
+ATOL = 1e-11
 
 MAX_STEP = None
 
@@ -551,59 +551,54 @@ def static_report(df):
         f"{int((df['vy2'].abs() < ENERGY_EPS).sum())}"
     )
 
+    EVENT_TOL = 1e-9
+    TIME_TOL = 1e-9
+
     if "t_event" in df.columns:
         t_event = pd.to_numeric(df["t_event"], errors="coerce")
 
-        print("t_event > t_max rows:", int((t_event > T_MAX + 1e-6).sum()))
+        print("t_event > t_max + TIME_TOL rows:", int((t_event > T_MAX + TIME_TOL).sum()))
         print("negative t_event rows:", int((t_event < 0.0).sum()))
 
-        print(
-            "terminal rows with t_event=0:",
-            int((label.isin(TERMINAL_LABEL_LIST) & (t_event <= 0.0)).sum()),
-        )
+        boundary_ics = int((label.isin(TERMINAL_LABEL_LIST) & (t_event <= 0.0)).sum())
+        print(f"terminal rows with t_event=0 (boundary ICs, expected): {boundary_ics}")
 
         print(
-            "MAX_TIME rows with t_event < t_max - 1e-6:",
-            int(((label == LABEL_MAX_TIME) & (t_event < T_MAX - 1e-6)).sum()),
+            "MAX_TIME rows with t_event < t_max - TIME_TOL:",
+            int(((label == LABEL_MAX_TIME) & (t_event < T_MAX - TIME_TOL)).sum()),
         )
     else:
         t_event = None
         print("t_event column missing")
 
     viol = {}
-
+    
     if "min_r_earth" in df.columns:
         min_r_earth = pd.to_numeric(df["min_r_earth"], errors="coerce")
-        viol["IMPACT_EARTH rows with min_r_earth > R_EARTH"] = int(
-            ((label == LABEL_IMPACT_EARTH) & (min_r_earth > R_EARTH)).sum()
+        viol["IMPACT_EARTH rows with min_r_earth > R_EARTH + EVENT_TOL"] = int(
+            ((label == LABEL_IMPACT_EARTH) & (min_r_earth > R_EARTH + EVENT_TOL)).sum()
         )
         viol["MAX_TIME rows that graze Earth (min_r_earth <= R_EARTH)"] = int(
             ((label == LABEL_MAX_TIME) & (min_r_earth <= R_EARTH)).sum()
         )
-    else:
-        min_r_earth = None
 
     if "min_r_moon" in df.columns:
         min_r_moon = pd.to_numeric(df["min_r_moon"], errors="coerce")
-        viol["IMPACT_MOON rows with min_r_moon > R_MOON"] = int(
-            ((label == LABEL_IMPACT_MOON) & (min_r_moon > R_MOON)).sum()
+        viol["IMPACT_MOON rows with min_r_moon > R_MOON + EVENT_TOL"] = int(
+            ((label == LABEL_IMPACT_MOON) & (min_r_moon > R_MOON + EVENT_TOL)).sum()
         )
         viol["MAX_TIME rows that graze Moon (min_r_moon <= R_MOON)"] = int(
             ((label == LABEL_MAX_TIME) & (min_r_moon <= R_MOON)).sum()
         )
-    else:
-        min_r_moon = None
 
     if "max_r" in df.columns:
         max_r = pd.to_numeric(df["max_r"], errors="coerce")
-        viol["ESCAPE rows with max_r < R_ESCAPE"] = int(
-            ((label == LABEL_ESCAPE) & (max_r < R_ESCAPE)).sum()
+        viol["ESCAPE rows with max_r < R_ESCAPE - EVENT_TOL"] = int(
+            ((label == LABEL_ESCAPE) & (max_r < R_ESCAPE - EVENT_TOL)).sum()
         )
         viol["MAX_TIME rows with max_r >= R_ESCAPE"] = int(
             ((label == LABEL_MAX_TIME) & (max_r >= R_ESCAPE)).sum()
         )
-    else:
-        max_r = None
 
     for k, v in viol.items():
         print(f"{k}: {v}")

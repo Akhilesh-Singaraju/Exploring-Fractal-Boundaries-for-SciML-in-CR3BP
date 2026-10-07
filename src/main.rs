@@ -164,15 +164,12 @@ pub fn solve_single(x0: f64, vx0: f64, jacobi_c: f64, t_max: f64) -> Solution {
         }
     }
 
-    let max_steps = (((t_max / MAX_STEP).ceil() as usize) * 2).clamp(10_000, 20_000_000);
-
     let system = Cr3bpSystem;
     let sol = Ivp::first_order(&system, 0.0, t_max, &y0)
         .method(Method::DOP853)
         .rtol(RTOL)
         .atol(ATOL)
         .max_step(MAX_STEP)
-        .max_steps(max_steps)
         .solve()
         .expect("DOP853 integration failed");
 
