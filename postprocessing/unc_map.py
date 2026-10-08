@@ -1,20 +1,28 @@
 import os
+import pickle
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
+import seaborn as sns
 
-DEVICE = torch.device("mps" if torch.mps.is_available() else "cpu")
+from matplotlib.colors import ListedColormap
+from scipy.interpolate import griddata
+
+DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 NUM_ENSEMBLE = 5
 C_VALUES = [3.00, 3.05, 3.10, 3.14]
+GRID_SIZES = [100, 300, 500, 700]
 DATA_DIR = "files/data"
 MODEL_DIR = "files/models"
 PLOT_DIR = "files/figures"
+PICKLE_DIR = "files/pickles"
+
 
 class FourierFeatures(nn.Module):
     def __init__(self, in_dim=2, num_features=256, scale=5.0, seed=0):
@@ -27,6 +35,7 @@ class FourierFeatures(nn.Module):
         z = x @ self.B
         return torch.cat([torch.sin(z), torch.cos(z), x], dim=-1)
 
+
 class ResBlock(nn.Module):
     def __init__(self, dim, dropout=0.1):
         super().__init__()
@@ -38,6 +47,7 @@ class ResBlock(nn.Module):
 
     def forward(self, x):
         return self.act(x + self.net(x))
+
 
 class BasinClassifier(nn.Module):
     def __init__(self, input_dim=2, num_classes=3, hidden=256, n_blocks=3,
@@ -54,12 +64,13 @@ class BasinClassifier(nn.Module):
     def forward(self, x):
         return self.head(self.blocks(self.stem(self.ff(x))))
 
-def load_ensemble(C):
-    save_dir = os.path.join(MODEL_DIR, f"{C:.2f}")
+
+def load_ensemble(C, res):
+    save_dir = os.path.join(MODEL_DIR, f"{C:.2f}", f"{res}x{res}")
     pre = torch.load(os.path.join(save_dir, "preprocessing.pt"), map_location="cpu", weights_only=False)
     mean, scale = pre["scaler_mean"], pre["scaler_scale"]
     classes = pre["label_classes"]
-    split_seed = 42 + int(C * 100)
+    split_seed = 42 + int(C * 100) + res
 
     models = []
     for i in range(NUM_ENSEMBLE):
@@ -73,11 +84,13 @@ def load_ensemble(C):
         models.append(m)
     return models, mean, scale, classes
 
-def compute_full_grid_uncertainty(C, batch_size=8192):
-    models, mean, scale, classes = load_ensemble(C)
+
+def compute_grid_uncertainty(C, res, batch_size=8192):
+    models, mean, scale, classes = load_ensemble(C, res)
     models = [m.to(DEVICE) for m in models]
 
-    df = pd.read_csv(os.path.join(DATA_DIR, f"basin_C{C:.2f}.csv"))
+    csv_path = os.path.join(DATA_DIR, f"{C:.2f}", f"{res}x{res}.csv")
+    df = pd.read_csv(csv_path)
     phys = df[df["label_id"].isin([1, 2, 3])].copy().reset_index(drop=True)
 
     X = phys[["x0", "vx0"]].to_numpy(dtype=np.float64)
@@ -92,57 +105,101 @@ def compute_full_grid_uncertainty(C, batch_size=8192):
             for mi, m in enumerate(models):
                 all_probs[s:s + batch_size, mi, :] = F.softmax(m(b), dim=1).cpu().numpy()
 
-    mean_probs = all_probs.mean(axis=1)                      # (N, K)
-    eps = 1e-12
-    H_mean = -(mean_probs * np.log(mean_probs + eps)).sum(axis=1)
-    H_ind = -(all_probs * np.log(all_probs + eps)).sum(axis=2)   # (N, M)
-    epi = H_mean - H_ind.mean(axis=1)                        
+    mean_probs = all_probs.mean(axis=1)
+    mean_probs = np.clip(mean_probs, 1e-12, 1.0)
+    all_probs = np.clip(all_probs, 1e-12, 1.0)
+
+    H_mean = -(mean_probs * np.log(mean_probs)).sum(axis=1)
+    H_ind = -(all_probs * np.log(all_probs)).sum(axis=2)
+    epi = H_mean - H_ind.mean(axis=1)
 
     phys["prob_earth"] = mean_probs[:, 0]
     phys["prob_moon"] = mean_probs[:, 1]
     phys["prob_escape"] = mean_probs[:, 2]
-    phys["pred_label_id"] = mean_probs.argmax(axis=1) + 1
+    phys["pred_label_id"] = classes[mean_probs.argmax(axis=1)]
     phys["predictive_entropy"] = H_mean
     phys["epi_uncertainty"] = epi
 
-    out = os.path.join(DATA_DIR, f"uncertainty_C{C:.2f}.csv")
+    out_dir = os.path.join(DATA_DIR, f"{C:.2f}")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, f"uncertainty_{res}x{res}.csv")
     phys.to_csv(out, index=False)
-    print(f"Saved {out} | N={N} | mean U_epi={epi.mean():.4f} | max U_epi={epi.max():.4f}")
-    return phys
+    print(f"  Saved {out} | N={N} | mean U_epi={epi.mean():.4f} | max U_epi={epi.max():.4f}")
+    return phys, df
 
-def plot_uncertainty_maps(C, phys):
-    os.makedirs(PLOT_DIR, exist_ok=True)
-    extent = [phys["x0"].min(), phys["x0"].max(), phys["vx0"].min(), phys["vx0"].max()]
+
+def plot_uncertainty_maps(C, res, phys, full):
+    x_unique = np.sort(full["x0"].unique())
+    vx_unique = np.sort(full["vx0"].unique())
+    nx, nvx = len(x_unique), len(vx_unique)
+
+    Z_lab = full["label_id"].values.reshape(nvx, nx)
+    valid = np.isin(Z_lab, [1, 2, 3])
+
+    g_true = np.where(valid, Z_lab, np.nan)
+    g_pred = np.full(Z_lab.shape, np.nan)
+    g_epi = np.full(Z_lab.shape, np.nan)
+    g_pred[valid] = phys["pred_label_id"].values
+    g_epi[valid] = phys["epi_uncertainty"].values
+
+    extent = [x_unique[0], x_unique[-1], vx_unique[0], vx_unique[-1]]
+
     cmap3 = ListedColormap(["#1f77b4", "#ff7f0e", "#2ca02c"])
+    cmap3.set_bad("lightgray")
+    hot = plt.get_cmap("hot").copy()
+    hot.set_bad("lightgray")
 
+    sns.set_theme(style="white", font_scale=1.0)
     fig, axes = plt.subplots(1, 3, figsize=(18, 5.2), dpi=200)
 
-    g_true = phys.pivot(index="vx0", columns="x0", values="label_id")
-    axes[0].imshow(g_true.values, origin="lower", extent=extent, aspect="auto",
-                   cmap=cmap3, vmin=1, vmax=3)
-    axes[0].set_title(f"True DOP853 basins (C={C:.2f})")
+    axes[0].imshow(g_true, origin="lower", extent=extent, aspect="auto",
+                   cmap=cmap3, vmin=1, vmax=3, interpolation="nearest")
+    axes[0].set_title(f"True DOP853 Basins\nC={C:.2f}, {res}×{res}", fontsize=12)
+    axes[0].set_xlabel(r"$x_0$ [LU]")
+    axes[0].set_ylabel(r"$vx_0$ [VU]")
 
-    g_pred = phys.pivot(index="vx0", columns="x0", values="pred_label_id")
-    axes[1].imshow(g_pred.values, origin="lower", extent=extent, aspect="auto",
-                   cmap=cmap3, vmin=1, vmax=3)
-    axes[1].set_title("Ensemble prediction (mean softmax)")
+    axes[1].imshow(g_pred, origin="lower", extent=extent, aspect="auto",
+                   cmap=cmap3, vmin=1, vmax=3, interpolation="nearest")
+    axes[1].set_title("Ensemble Prediction\n(Mean Softmax)", fontsize=12)
+    axes[1].set_xlabel(r"$x_0$ [LU]")
 
-    g_epi = phys.pivot(index="vx0", columns="x0", values="epi_uncertainty")
-    im = axes[2].imshow(g_epi.values, origin="lower", extent=extent, aspect="auto",
-                    cmap="hot", vmin=0, vmax=np.percentile(g_epi.values, 99))
-    axes[2].set_title("Epistemic uncertainty (mutual information)")
-    plt.colorbar(im, ax=axes[2], fraction=0.046)
+    epi_valid = g_epi[~np.isnan(g_epi)]
+    vmax_epi = np.percentile(epi_valid, 99) if len(epi_valid) > 0 else 1.0
 
-    for ax in axes:
-        ax.set_xlabel("x0 [LU]")
-    axes[0].set_ylabel("vx0 [VU]")
+    im = axes[2].imshow(g_epi, origin="lower", extent=extent, aspect="auto",
+                        cmap=hot, vmin=0, vmax=vmax_epi,
+                        interpolation="nearest")
+    axes[2].set_title("Epistemic Uncertainty\n(Mutual Information)", fontsize=12)
+    axes[2].set_xlabel(r"$x_0$ [LU]")
+    plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
 
-    path = os.path.join(PLOT_DIR, f"uncertainty_C{C:.2f}.png")
-    fig.savefig(path, bbox_inches="tight", dpi=200)
+    fig.tight_layout()
+
+    png_path = os.path.join(PLOT_DIR, f"uncertainty_C{C:.2f}_{res}x{res}.png")
+    pkl_path = os.path.join(PICKLE_DIR, f"uncertainty_C{C:.2f}_{res}x{res}.pkl")
+
+    fig.savefig(png_path, bbox_inches="tight", dpi=200)
+
+    with open(pkl_path, "wb") as f:
+        pickle.dump(fig, f)
+
     plt.close(fig)
-    print(f"Saved {path}")
+    print(f"  Saved {png_path}")
+    print(f"  Saved {pkl_path}")
+
 
 if __name__ == "__main__":
     for C in C_VALUES:
-        phys = compute_full_grid_uncertainty(C)
-        plot_uncertainty_maps(C, phys)
+        print(f"\n{'='*60}")
+        print(f"C = {C:.2f}")
+        print(f"{'='*60}")
+
+        for res in GRID_SIZES:
+            print(f"\n--- {res}×{res} ---")
+            try:
+                phys, full = compute_grid_uncertainty(C, res)
+                plot_uncertainty_maps(C, res, phys, full)
+            except FileNotFoundError as e:
+                print(f"  Missing files for C={C:.2f} res={res}, skipping: {e}")
+            except Exception as e:
+                print(f"  Error processing C={C:.2f} res={res}: {e}")
