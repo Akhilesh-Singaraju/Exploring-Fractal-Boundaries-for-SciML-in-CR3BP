@@ -139,7 +139,7 @@ def compute_physical_alpha(csv_path, num_samples=3000, epsilons=None,
     if epsilons is None:
         lo = 2.5 * grid_scale
         hi = 0.4
-        epsilons = np.logspace(np.log10(lo), np.log10(hi), 10)
+        epsilons = np.logspace(np.log10(0.005), np.log10(0.05), 8)
     epsilons = np.asarray(epsilons, dtype=np.float64)
 
     phys_mask = np.isin(labels, np.array(PHYSICAL_LABELS, dtype=np.int64))
