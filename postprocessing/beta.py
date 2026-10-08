@@ -24,6 +24,11 @@ C_VALUES = [3.00, 3.05, 3.10, 3.14]
 GRID_SIZES = [100, 300, 500, 700]
 FINEST_RES = 700
 
+EPS_MIN = 1e-3
+EPS_MAX = 0.4
+N_EPS = 16
+EPS_MAX_FIT = 0.10
+
 ALPHA = {
     3.00: (0.1226, 0.1100, 0.1305),
     3.05: (0.1233, 0.1211, 0.1421),
@@ -50,6 +55,45 @@ def load_ensemble(C, res):
         m.eval()
         models.append(m)
     return models, mean, scale, classes
+
+
+def boundary_dimension(labels2d, valid):
+    Z = np.where(valid, labels2d, -1)
+    bnd = np.zeros(Z.shape, dtype=bool)
+    bnd[:-1, :] |= (Z[:-1, :] != Z[1:, :]) & valid[:-1, :] & valid[1:, :]
+    bnd[:, :-1] |= (Z[:, :-1] != Z[:, 1:]) & valid[:, :-1] & valid[:, 1:]
+    ys, xs = np.nonzero(bnd)
+    if len(xs) < 100:
+        return np.nan
+    n = max(Z.shape)
+    sizes, counts = [], []
+    s = 1
+    while s <= n // 4:
+        keys = (xs // s).astype(np.int64) * (n // s + 1) + (ys // s).astype(np.int64)
+        sizes.append(1.0 / s)
+        counts.append(len(np.unique(keys)))
+        s *= 2
+    r = linregress(np.log(sizes), np.log(counts))
+    return r.slope
+
+
+def compute_boundary_dimensions(C, res=FINEST_RES):
+    csv_path = os.path.join(DATA_DIR, f"{C:.2f}", f"{res}x{res}.csv")
+    full = pd.read_csv(csv_path)
+    x_unique = np.sort(full["x0"].unique())
+    vx_unique = np.sort(full["vx0"].unique())
+    nx, nvx = len(x_unique), len(vx_unique)
+    Z_lab = full["label_id"].values.reshape(nvx, nx)
+    valid = np.isin(Z_lab, [1, 2, 3])
+
+    unc_path = os.path.join(DATA_DIR, f"{C:.2f}", f"uncertainty_{res}x{res}.csv")
+    phys = pd.read_csv(unc_path)
+    Z_pred = np.full(Z_lab.shape, -1, dtype=np.int64)
+    Z_pred[valid] = phys["pred_label_id"].values
+
+    d_true = boundary_dimension(Z_lab, valid)
+    d_learned = boundary_dimension(Z_pred, valid)
+    return d_true, d_learned
 
 
 def compute_direct_betas(C, res=FINEST_RES, num_samples=2000, n_dirs=8,
@@ -91,7 +135,7 @@ def compute_direct_betas(C, res=FINEST_RES, num_samples=2000, n_dirs=8,
     unique_vx = np.sort(phys["vx0"].unique())
     grid_scale = max(unique_x[1] - unique_x[0], unique_vx[1] - unique_vx[0]) if len(unique_x) > 1 else 0.02
 
-    epsilons = np.logspace(np.log10(2.5 * grid_scale), np.log10(0.4), 10)
+    epsilons = np.logspace(np.log10(EPS_MIN), np.log10(EPS_MAX), N_EPS)
     ne = len(epsilons)
 
     rng = np.random.default_rng(seed)
@@ -187,11 +231,14 @@ def compute_direct_betas(C, res=FINEST_RES, num_samples=2000, n_dirs=8,
         r = linregress(log_e, np.log(obs[mask]))
         return r.slope, r.rvalue ** 2
 
+    def fit_points(obs, e_lo, e_hi):
+        mask = (epsilons >= e_lo) & (epsilons <= e_hi) & (obs > 0)
+        return int(mask.sum())
+
     beta_flip_full, r2_flip_full = fit_window(flip, epsilons[0], epsilons[-1])
     beta_dP_full, r2_dP_full = fit_window(dP, epsilons[0], epsilons[-1])
     beta_dU_full, r2_dU_full = fit_window(dU, epsilons[0], epsilons[-1])
 
-    EPS_MAX_FIT = 0.10
     beta_flip, r2_flip = fit_window(flip, epsilons[0], EPS_MAX_FIT)
     beta_dP, r2_dP = fit_window(dP, epsilons[0], EPS_MAX_FIT)
     beta_dU, r2_dU = fit_window(dU, epsilons[0], EPS_MAX_FIT)
@@ -237,6 +284,9 @@ def compute_direct_betas(C, res=FINEST_RES, num_samples=2000, n_dirs=8,
         "r2_dP_full": r2_dP_full,
         "beta_dU_full": beta_dU_full,
         "r2_dU_full": r2_dU_full,
+        "n_fit_flip": fit_points(flip, epsilons[0], EPS_MAX_FIT),
+        "n_fit_dP": fit_points(dP, epsilons[0], EPS_MAX_FIT),
+        "n_fit_dU": fit_points(dU, epsilons[0], EPS_MAX_FIT),
         "stability": stability,
         "grid_scale": grid_scale,
         "res": res,
@@ -342,6 +392,9 @@ def plot_alpha_beta_comparison(results_df):
            color="tab:red", alpha=0.8,
            yerr=[beta_flip - beta_flip_lo, beta_flip_hi - beta_flip], capsize=4)
 
+    ax.axhline(1.0, linestyle=":", color="gray", linewidth=1.5,
+               label="smooth-boundary prediction ($\\beta=1$)")
+
     ax.set_xticks(x_pos)
     ax.set_xticklabels([f"{c:.2f}" for c in c_vals])
     ax.set_xlabel("Jacobi constant C")
@@ -384,6 +437,23 @@ if __name__ == "__main__":
 
         plot_results(C, res_dict)
 
+        curve_df = pd.DataFrame({
+            "epsilon": res_dict["epsilons"],
+            "flip": res_dict["flip"],
+            "dP": res_dict["dP"],
+            "dU": res_dict["dU"],
+            "valid_frac": res_dict["valid_frac"],
+        })
+        curve_path = os.path.join(DATA_DIR, f"beta_curves_C{C:.2f}.csv")
+        curve_df.to_csv(curve_path, index=False)
+        print(f"  Saved {curve_path}")
+
+        try:
+            d_true, d_learned = compute_boundary_dimensions(C, FINEST_RES)
+        except FileNotFoundError as e:
+            print(f"  Missing uncertainty CSV for boundary dimensions: {e}")
+            d_true, d_learned = np.nan, np.nan
+
         a, a_lo, a_hi = ALPHA[C]
         bf, bf_ci, r2f = res_dict["beta_flip"]
         bp, bp_ci, r2p = res_dict["beta_dP"]
@@ -397,14 +467,19 @@ if __name__ == "__main__":
             beta_dP_full=res_dict["beta_dP_full"], r2_dP_full=res_dict["r2_dP_full"],
             beta_dU=bu, beta_dU_lo=bu_ci[0], beta_dU_hi=bu_ci[1], r2_dU=r2u,
             beta_dU_full=res_dict["beta_dU_full"], r2_dU_full=res_dict["r2_dU_full"],
+            n_fit_flip=res_dict["n_fit_flip"],
+            n_fit_dP=res_dict["n_fit_dP"],
+            n_fit_dU=res_dict["n_fit_dU"],
+            D_true=d_true, D_learned=d_learned,
             grid_scale=res_dict["grid_scale"],
             res=FINEST_RES,
         ))
 
         print(f"\n  C={C:.2f}  alpha={a:.4f} [{a_lo:.4f},{a_hi:.4f}]")
-        print(f"   beta_flip (restricted)={bf:.4f} [{bf_ci[0]:.4f},{bf_ci[1]:.4f}]  R2={r2f:.3f} | (full)={res_dict['beta_flip_full']:.4f}")
-        print(f"   beta_dP   (restricted)={bp:.4f} [{bp_ci[0]:.4f},{bp_ci[1]:.4f}]  R2={r2p:.3f} | (full)={res_dict['beta_dP_full']:.4f}")
-        print(f"   beta_dU   (restricted)={bu:.4f} [{bu_ci[0]:.4f},{bu_ci[1]:.4f}]  R2={r2u:.3f} | (full)={res_dict['beta_dU_full']:.4f}")
+        print(f"   beta_flip (restricted)={bf:.4f} [{bf_ci[0]:.4f},{bf_ci[1]:.4f}]  R2={r2f:.3f} | (full)={res_dict['beta_flip_full']:.4f} | n_fit={res_dict['n_fit_flip']}")
+        print(f"   beta_dP   (restricted)={bp:.4f} [{bp_ci[0]:.4f},{bp_ci[1]:.4f}]  R2={r2p:.3f} | (full)={res_dict['beta_dP_full']:.4f} | n_fit={res_dict['n_fit_dP']}")
+        print(f"   beta_dU   (restricted)={bu:.4f} [{bu_ci[0]:.4f},{bu_ci[1]:.4f}]  R2={r2u:.3f} | (full)={res_dict['beta_dU_full']:.4f} | n_fit={res_dict['n_fit_dU']}")
+        print(f"   D_true={d_true:.4f}  D_learned={d_learned:.4f}  (2-alpha={2-a:.4f})")
         print(f"   Valid frac range: [{res_dict['valid_frac'].min():.3f}, {res_dict['valid_frac'].max():.3f}]")
 
     if rows:
