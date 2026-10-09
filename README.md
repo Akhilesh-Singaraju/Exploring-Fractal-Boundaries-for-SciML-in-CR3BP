@@ -1,6 +1,6 @@
 # Does ensemble-based epistemic uncertainty in a neural-network model of the planar Earth–Moon Circular Restricted Three-Body Problem exhibit power-law scaling near fractal escape and collision basin boundaries, and how does its scaling exponent compare with the classical uncertainty exponent $\alpha=D-d$?
 
-![Uncertainity Map](files/figures/uncertainty_C3.00.png)
+![Uncertainity Map](files/figures/uncertainty_C3.00_100x100.png)
 
 This this the code repository of my paper, which aims to explore how trained neural parameters may hold additional information about the complexity of fractal geometry at that region of space, opening up possibilities to a wide variety of novel applicaitons. This codebase provides relevant python code for:
 - Data generation
