@@ -119,7 +119,7 @@ pub struct Solution {
     pub jacobi_error: f64,
 }
 
-pub fn solve_single(x0: f64, vx0: f64, jacobi_c: f64, t_max: f64) -> Solution {
+pub fn solve_single_custom(x0: f64, vx0: f64, jacobi_c: f64, t_max: f64, custom_rtol: f64, custom_atol: f64) -> Solution {
     let r1_0 = (x0 + MU).abs();
     let r2_0 = (x0 - 1.0 + MU).abs();
 
@@ -167,13 +167,13 @@ pub fn solve_single(x0: f64, vx0: f64, jacobi_c: f64, t_max: f64) -> Solution {
     let system = Cr3bpSystem;
     let sol = Ivp::first_order(&system, 0.0, t_max, &y0)
         .method(Method::DOP853)
-        .rtol(RTOL)
-        .atol(ATOL)
+        .rtol(custom_rtol)  // <--- CHANGED
+        .atol(custom_atol)  // <--- CHANGED
         .max_step(MAX_STEP)
         .solve()
         .expect("DOP853 integration failed");
 
-    const EVENT_LABELS: [u8; 3] = [1, 2, 3]; // Earth, Moon, Escape
+    const EVENT_LABELS: [u8; 3] = [1, 2, 3];
     let mut earliest: Option<(usize, f64)> = None;
     for idx in 0..3 {
         if let Some(&te) = sol.t_events.get(idx).and_then(|v| v.first()) {
@@ -235,6 +235,9 @@ pub fn solve_single(x0: f64, vx0: f64, jacobi_c: f64, t_max: f64) -> Solution {
     }
 }
 
+pub fn solve_single(x0: f64, vx0: f64, jacobi_c: f64, t_max: f64) -> Solution {
+    solve_single_custom(x0, vx0, jacobi_c, t_max, RTOL, ATOL)
+}
 pub fn solve_batch(xs: &[f64], vxs: &[f64], c: f64, t_max: f64) -> Vec<Solution> {
     xs.par_iter()
         .zip(vxs.par_iter())
@@ -651,8 +654,54 @@ pub fn diagnose_single(x0: f64, vx0: f64, c: f64, t_max: f64) {
     println!("====================================\n");
 }
 
+pub fn tolerance_refinement(filepath: &str) {
+    println!("Reading CSV for tolerance refinement: {}", filepath);
+    let df = read_basin_csv(filepath).expect("failed to read CSV");
+    
+    let mut unresolved: Vec<&CsvRow> = df.iter().filter(|r| r.outcome == "MAX_TIME").collect();
+    unresolved.sort_by(|a, b| b.t_event.partial_cmp(&a.t_event).unwrap());
+    let stress_points: Vec<&CsvRow> = unresolved.into_iter().take(1000).collect();
+    
+    if stress_points.is_empty() {
+        println!("No MAX_TIME trajectories found to test.");
+        return;
+    }
+
+    println!("Running Tolerance Refinement on {} stress points...", stress_points.len());
+    
+    let x0s: Vec<f64> = stress_points.iter().map(|r| r.x0).collect();
+    let vx0s: Vec<f64> = stress_points.iter().map(|r| r.vx0).collect();
+    let cs: Vec<f64> = stress_points.iter().map(|r| r.c).collect();
+    let t_maxs: Vec<f64> = stress_points.iter().map(|r| r.t_event + 100.0).collect(); // Integrate slightly past their recorded event time
+
+    let sols_loose: Vec<Solution> = x0s.par_iter()
+        .zip(vx0s.par_iter())
+        .zip(cs.par_iter())
+        .zip(t_maxs.par_iter())
+        .map(|(((x, vx), c), t)| solve_single_custom(*x, *vx, *c, *t, 1e-9, 1e-11))
+        .collect();
+
+    let sols_strict: Vec<Solution> = x0s.par_iter()
+        .zip(vx0s.par_iter())
+        .zip(cs.par_iter())
+        .zip(t_maxs.par_iter())
+        .map(|(((x, vx), c), t)| solve_single_custom(*x, *vx, *c, *t, 1e-12, 1e-14))
+        .collect();
+
+    let mut mismatches = 0;
+    for (loose, strict) in sols_loose.iter().zip(sols_strict.iter()) {
+        if loose.label != strict.label {
+            mismatches += 1;
+        }
+    }
+    
+    println!("Label mismatches under tighter tolerance (1e-12 vs 1e-9): {}/{}", mismatches, stress_points.len());
+    println!("Label stability: {:.4}%", 100.0 * (1.0 - (mismatches as f64 / stress_points.len() as f64)));
+}
+
 fn main() {
     // pre_test_convergence(3.00, &[500.0, 1000.0, 5000.0, 10000.0, 12000.0], 1000);
-    run_batch_generation(8100.0);
+    // run_batch_generation(8100.0);
     // diagnose_single(0.065217, -2.177258, 3.05, 5000.0);
+    tolerance_refinement("files/data/3.10/700x700.csv");
 }
