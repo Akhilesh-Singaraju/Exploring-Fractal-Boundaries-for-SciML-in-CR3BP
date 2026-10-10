@@ -292,7 +292,6 @@ def run_dbox_sweep():
             true_grid[iy, ix] = pd.to_numeric(frame["label_id"], errors="raise").astype(int).to_numpy()
             valid_true = np.isin(true_grid, list(VALID_LABELS))
 
-            # Evaluate the saved ensemble on the intended full coordinate grid.
             models, mean, scale = load_ensemble(c_value, res)
             xx, vv = np.meshgrid(x_grid, vx_grid)
             grid_points = np.column_stack([xx.ravel(), vv.ravel()])
@@ -301,7 +300,6 @@ def run_dbox_sweep():
             del models
 
             true_boundary = transition_boundary(true_grid, valid_true)
-            # Restrict learned boundary to the same reference-valid cells.
             learned_boundary = transition_boundary(pred_grid, valid_true)
             true_fit, true_details = fit_box_counts(true_boundary, res)
             learned_fit, learned_details = fit_box_counts(learned_boundary, res)
@@ -488,7 +486,6 @@ def run_beta_bootstrap():
                 raise ValueError(f"{path} must contain x0, vx0, label_id")
             _, _, ix, iy = validated_grid_indices(frame, res, allow_missing=True)
             frame = frame[np.isin(pd.to_numeric(frame["label_id"], errors="raise").to_numpy(), list(VALID_LABELS))].reset_index(drop=True)
-            # Recompute grid indices after filtering so the spatial-block sample uses matching rows.
             _, _, ix, iy = validated_grid_indices(frame, res, allow_missing=True)
             n_sample = min(N_PERTURB, len(frame))
             selected_rows, selected_blocks = sample_uniform_grid_blocks(frame, ix, iy, res, rng, n_sample)
@@ -608,8 +605,6 @@ def safe_binary_metrics(y_true, scores):
 
 
 def run_mi_localization():
-    # Use the raw trajectory file as the reference grid. Uncertainty CSVs may
-    # contain only a filtered subset of x0 values and must not define the grid.
     raw_path = DATA_DIR / f"{MI_C_VALUE:.2f}" / RAW_FILE_TEMPLATE.format(res=MI_RESOLUTION)
     if not raw_path.exists():
         raise FileNotFoundError(f"MI localization needs the raw full-grid reference file: {raw_path}")
@@ -625,9 +620,6 @@ def run_mi_localization():
     valid_grid = np.isin(true_grid, list(VALID_LABELS))
     boundary_grid = transition_boundary(true_grid, valid_grid)
 
-    # Recompute ensemble MI, predictive entropy, and mean probabilities on the
-    # complete intended grid. This avoids requiring precomputed probability
-    # columns in a possibly filtered uncertainty CSV.
     models, mean, scale = load_ensemble(MI_C_VALUE, res)
     xx, vv = np.meshgrid(x_grid, vx_grid)
     grid_points = np.column_stack([xx.ravel(), vv.ravel()])
@@ -640,14 +632,12 @@ def run_mi_localization():
     mi_grid = mi_values.reshape(res, res)
     entropy_grid = entropy_values.reshape(res, res)
 
-    # Physical-coordinate gradients, not a generic 1/(res-1) scale for both axes.
     dx = float(x_grid[1] - x_grid[0])
     dvx = float(vx_grid[1] - vx_grid[0])
     grad_x = np.gradient(prob_grid, dx, axis=1)
     grad_vx = np.gradient(prob_grid, dvx, axis=0)
     gradient_grid = np.sqrt(np.sum(grad_x ** 2 + grad_vx ** 2, axis=2))
 
-    # Exclude cells with no reference label and any invalid neighborhoods.
     eval_mask = valid_grid & np.isfinite(mi_grid) & np.isfinite(entropy_grid) & np.isfinite(gradient_grid)
     if eval_mask.sum() == 0:
         raise ValueError("No valid cells remain after applying the shared finite-score mask")
