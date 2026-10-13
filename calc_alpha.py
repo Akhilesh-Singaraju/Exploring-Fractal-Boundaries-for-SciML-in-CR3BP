@@ -103,11 +103,6 @@ def _build_grid(x, vx, labels):
 
 
 def _default_epsilons(x_min, x_max, vx_min, vx_max, dx, dvx):
-    """
-    Fix: choose epsilon range from grid spacing and domain size.
-    Lower bound avoids discretization artifacts.
-    Upper bound avoids large-scale saturation.
-    """
     grid_scale = max(float(dx), float(dvx), 1.0e-12)
 
     x_span = max(float(x_max - x_min), grid_scale)
@@ -361,6 +356,22 @@ if __name__ == "__main__":
     N_BOOTSTRAP = 200
 
     rows = []
+
+    # df = pd.read_csv("files/data/3.00/700x700.csv")
+    
+    # x = pd.to_numeric(df["x0"], errors="coerce")
+    # vx = pd.to_numeric(df["vx0"], errors="coerce")
+    # labels = pd.to_numeric(df["label_id"], errors="coerce")
+
+    # valid = x.notna() & vx.notna() & labels.notna()
+    # df = df.loc[valid].copy()
+
+    # print("Rows:", len(df))
+    # print("Unique x:", df["x0"].nunique())
+    # print("Unique vx:", df["vx0"].nunique())
+    # print("Unique (x, vx) pairs:", df[["x0", "vx0"]].drop_duplicates().shape[0])
+    # print("Expected grid cells:", df["x0"].nunique() * df["vx0"].nunique())
+    # print("Physical-label fraction:", df["label_id"].isin([1, 2, 3]).mean())
 
     for C in C_values:
         path = f"files/data/{C:.2f}/700x700.csv"

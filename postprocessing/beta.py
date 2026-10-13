@@ -30,10 +30,10 @@ N_EPS = 16
 EPS_MAX_FIT = 0.10
 
 ALPHA = {
-    3.00: (0.1226, 0.1100, 0.1305),
-    3.05: (0.1233, 0.1211, 0.1421),
-    3.10: (0.1495, 0.1313, 0.1576),
-    3.14: (0.1625, 0.1536, 0.1819),
+    3.00: (0.15503600128062867, 0.14830437980416078, 0.16489274609962415),
+    3.05: (0.18425028148401387, 0.166647606341994, 0.18585212204622475),
+    3.10: (0.21760320848243597, 0.19734854954132589, 0.21618641767156727),
+    3.14: (0.25506611706505733, 0.24302455336568, 0.2666283748112228),
 }
 
 
@@ -384,13 +384,23 @@ def plot_alpha_beta_comparison(results_df):
     x_pos = np.arange(len(c_vals))
     width = 0.35
 
+    alpha_yerr = [
+        np.maximum(0, alpha - alpha_lo), 
+        np.maximum(0, alpha_hi - alpha)
+    ]
+
+    beta_flip_yerr = [
+        np.maximum(0, beta_flip - beta_flip_lo), 
+        np.maximum(0, beta_flip_hi - beta_flip)
+    ]
+
     ax.bar(x_pos - width / 2, alpha, width, label=r"Classical $\alpha$",
            color="tab:blue", alpha=0.8,
-           yerr=[alpha - alpha_lo, alpha_hi - alpha], capsize=4)
+           yerr=alpha_yerr, capsize=4)
 
     ax.bar(x_pos + width / 2, beta_flip, width, label=r"NN $\beta_{flip}$",
            color="tab:red", alpha=0.8,
-           yerr=[beta_flip - beta_flip_lo, beta_flip_hi - beta_flip], capsize=4)
+           yerr=beta_flip_yerr, capsize=4)
 
     ax.axhline(1.0, linestyle=":", color="gray", linewidth=1.5,
                label="smooth-boundary prediction ($\\beta=1$)")
